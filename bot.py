@@ -121,4 +121,93 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if codes[code]["
+    if codes[code]["used_by"] is not None:
+        await update.message.reply_text(
+            "❌ *Already Redeemed*\nThis code has already been used.",
+            parse_mode="Markdown"
+        )
+        return
+
+    codes[code]["used_by"] = user_id
+    await update.message.reply_text(
+        f"🎉 *Success!*\n\n{codes[code]['text']}",
+        parse_mode="Markdown"
+    )
+
+async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await force_join_check(update, context):
+        return
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not codes:
+        await update.message.reply_text(
+            "ℹ️ *No codes have been created yet.*",
+            parse_mode="Markdown"
+        )
+        return
+
+    message = "📋 *Redeem Codes List:*\n\n"
+    for code, info in codes.items():
+        status = "✅ Available" if info["used_by"] is None else f"❌ Redeemed by user `{info['used_by']}`"
+        message += f"• `{code}` — {status}\n"
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await force_join_check(update, context):
+        return
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "⚠️ *Invalid Usage*\n\n"
+            "Use:\n"
+            "`/deletecode <code>`",
+            parse_mode="Markdown"
+        )
+        return
+
+    code = context.args[0].upper()
+
+    if code not in codes:
+        await update.message.reply_text(
+            "❌ *Code Not Found*\nPlease check the code and try again.",
+            parse_mode="Markdown"
+        )
+        return
+
+    del codes[code]
+    await update.message.reply_text(
+        f"🗑️ *Code Deleted*\nCode `{code}` has been removed.",
+        parse_mode="Markdown"
+    )
+
+# Flask app for hosting health check
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "🤖 Redeem Code Bot is running!"
+
+def run_flask():
+    port = int(os.getenv("PORT", "5000"))
+    flask_app.run(host="0.0.0.0", port=port)
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("generate", generate))
+    app.add_handler(CommandHandler("redeem", redeem))
+    app.add_handler(CommandHandler("listcodes", listcodes))
+    app.add_handler(CommandHandler("deletecode", deletecode))
+
+    # Run Flask app in background thread
+    Thread(target=run_flask).start()
+
+    print("Bot is running...")
+    loop = asyncio.get_event_loop()
+    loop.create_task(app.run_polling())
+    loop.run_forever()
+
+if __name__ == "__main__":
+    main()
