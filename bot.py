@@ -47,9 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to the Redeem Code Bot!*\n\n"
         "Use the command below to redeem your code:\n"
-        "`/redeem <code>`\n\n"
-        "If you are the admin, you can generate codes with:\n"
-        "`/generate <code> <custom message>`",
+        "`/redeem <code>`\n\n",
         parse_mode="Markdown",
     )
 
