@@ -1,19 +1,20 @@
 import os
 import asyncio
-from flask import Flask, request
+from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import BadRequest
 
-# Environment variables (for Render)
+# Get token and admin ID from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1694669957"))
-FORCE_JOIN_CHANNEL = "@botsproupdates"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL", "@botsproupdates")
+
+if not BOT_TOKEN or ADMIN_ID == 0:
+    raise ValueError("Missing BOT_TOKEN or ADMIN_ID environment variables!")
 
 codes = {}
-
-# Telegram bot handlers (same as before, with minor changes)
 
 async def is_user_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -148,7 +149,7 @@ async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del codes[code]
     await update.message.reply_text(f"🗑️ *Code Deleted*\nCode `{code}` has been removed.", parse_mode="Markdown")
 
-# Flask app setup
+# Flask app for Render
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -156,7 +157,7 @@ def home():
     return "🤖 Redeem Code Bot is running!"
 
 def run_flask():
-    port = int(os.getenv("PORT", "5000"))  # Render sets PORT env var automatically
+    port = int(os.getenv("PORT", "5000"))
     flask_app.run(host="0.0.0.0", port=port)
 
 def main():
@@ -168,7 +169,7 @@ def main():
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
 
-    # Start Flask app in a separate thread
+    # Run Flask in separate thread
     Thread(target=run_flask).start()
 
     print("Bot is running...")
