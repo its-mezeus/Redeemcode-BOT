@@ -1,5 +1,4 @@
 import os
-import asyncio
 import random
 import string
 import logging
@@ -286,7 +285,7 @@ def main():
     Thread(target=run_flask, daemon=True).start()
 
     logger.info("Bot is starting...")
-    asyncio.run(app.run_polling())
+    app.run_polling()  # <-- Fixed here: no asyncio.run()
 
 if __name__ == "__main__":
     main()
