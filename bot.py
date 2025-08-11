@@ -7,6 +7,7 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.error import BadRequest
 
 # Enable logging
 logging.basicConfig(
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Load config from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # Example: "@YourChannel"
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. "@YourChannel" or "-1001234567890"
 
 if not BOT_TOKEN or ADMIN_ID == 0:
     raise ValueError("Missing BOT_TOKEN or ADMIN_ID environment variables!")
@@ -46,21 +47,40 @@ def generate_random_code(length=8):
     chars = string.ascii_uppercase + string.digits
     return ''.join(random.choices(chars, k=length))
 
-# Force join check
+# Improved Force join check
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not FORCE_JOIN_CHANNEL:
         return True  # No channel set, skip check
 
     user_id = update.effective_user.id
+    chat_id = FORCE_JOIN_CHANNEL.strip()
+
     try:
-        member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
+        # Try to get chat member status
+        member = await context.bot.get_chat_member(chat_id, user_id)
         if member.status in ["member", "administrator", "creator"]:
             return True
         else:
-            raise Exception("Not a member")
-    except:
+            raise Exception("User is not a member")
+    except Exception:
+        # Prepare join link:
+        # If FORCE_JOIN_CHANNEL is a numeric ID (starts with -100), try to get invite link from chat info
+        if chat_id.startswith("-100") or chat_id.lstrip("-").isdigit():
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                invite_link = chat.invite_link
+                if not invite_link:
+                    # fallback link if invite_link is not set (private channel with no public link)
+                    invite_link = f"https://t.me/c/{chat_id.replace('-100', '')}"
+            except BadRequest:
+                # fallback general link
+                invite_link = "https://t.me/"
+        else:
+            # Assume it's a public username channel, remove @ if present
+            invite_link = f"https://t.me/{chat_id.lstrip('@')}"
+
         join_button = [
-            [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]
+            [InlineKeyboardButton("📢 Join Channel", url=invite_link)]
         ]
         await update.message.reply_text(
             "⚠️ You must join our channel before using this bot.",
