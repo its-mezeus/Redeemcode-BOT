@@ -17,18 +17,12 @@ logger = logging.getLogger(__name__)
 
 # Load config from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Allow multiple admins separated by commas in ADMIN_IDS
-ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip().isdigit()]
-
-if not BOT_TOKEN or not ADMIN_IDS:
-    raise ValueError("Missing BOT_TOKEN or ADMIN_IDS environment variables!")
+if not BOT_TOKEN or ADMIN_ID == 0:
+    raise ValueError("Missing BOT_TOKEN or ADMIN_ID environment variables!")
 
 codes = {}
-
-# Helper function to check if user is admin
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
 
 start_message_user = (
     "👋 *Welcome to the Redeem Code Bot!*\n\n"
@@ -51,13 +45,13 @@ def generate_random_code(length=8):
     return ''.join(random.choices(chars, k=length))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_admin(update.effective_user.id):
+    if update.effective_user.id == ADMIN_ID:
         await update.message.reply_text(start_message_admin, parse_mode="Markdown")
     else:
         await update.message.reply_text(start_message_user, parse_mode="Markdown")
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
             "❌ *Unauthorized*\nYou do not have permission to generate codes.",
             parse_mode="Markdown"
@@ -90,7 +84,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
             "❌ *Unauthorized*\nYou do not have permission to generate codes.",
             parse_mode="Markdown"
@@ -104,6 +98,7 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Generate unique code
     while True:
         code = generate_random_code()
         if code not in codes:
@@ -224,7 +219,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         return
     if not codes:
         await update.message.reply_text(
@@ -240,7 +235,7 @@ async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode="Markdown")
 
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         return
     if len(context.args) != 1:
         await update.message.reply_text(
@@ -287,6 +282,7 @@ def main():
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
 
+    # Run Flask app in background thread
     Thread(target=run_flask, daemon=True).start()
 
     logger.info("Bot is starting...")
