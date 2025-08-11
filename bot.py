@@ -3,6 +3,7 @@ import asyncio
 import random
 import string
 import logging
+import re
 from flask import Flask
 from threading import Thread
 from telegram import Update
@@ -24,20 +25,24 @@ if not BOT_TOKEN or ADMIN_ID == 0:
 
 codes = {}
 
-start_message_user = (
-    "👋 *Welcome to the Redeem Code Bot!*\n\n"
+def escape_md(text: str) -> str:
+    """Escape text for Telegram MarkdownV2"""
+    return re.sub(r'([_*()~`>#+\-=|{}.!])', r'\\\1', text)
+
+start_message_user = escape_md(
+    "👋 Welcome to the Redeem Code Bot!\n\n"
     "Use the command below to redeem your code:\n\n"
-    "`/redeem <code>`\n\n"
+    "/redeem <code>\n\n"
     "Enjoy! 🤍"
 )
 
-start_message_admin = (
-    "👋 *Welcome to the Redeem Code Bot!*\n\n"
+start_message_admin = escape_md(
+    "👋 Welcome to the Redeem Code Bot!\n\n"
     "Use the command below to redeem your code:\n\n"
-    "`/redeem <code>`\n\n"
+    "/redeem <code>\n\n"
     "If you are the admin, you can generate codes with:\n\n"
-    "`/generate <code> <custom message>`\n"
-    "Or reply to any message with `/generate_random <optional custom message>` to create a random code."
+    "/generate <code> <custom message>\n"
+    "Or reply to any message with /generate_random <optional custom message> to create a random code."
 )
 
 def generate_random_code(length=8):
@@ -46,24 +51,22 @@ def generate_random_code(length=8):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text(start_message_admin, parse_mode="Markdown")
+        await update.message.reply_text(start_message_admin, parse_mode="MarkdownV2")
     else:
-        await update.message.reply_text(start_message_user, parse_mode="Markdown")
+        await update.message.reply_text(start_message_user, parse_mode="MarkdownV2")
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
-            "❌ *Unauthorized*\nYou do not have permission to generate codes.",
-            parse_mode="Markdown"
+            escape_md("❌ Unauthorized\nYou do not have permission to generate codes."),
+            parse_mode="MarkdownV2"
         )
         return
 
     if len(context.args) < 2:
         await update.message.reply_text(
-            "⚠️ *Invalid Usage*\n\n"
-            "Correct format:\n"
-            "`/generate <code> <custom message>`",
-            parse_mode="Markdown"
+            escape_md("⚠️ Invalid Usage\n\nCorrect format:\n/generate <code> <custom message>"),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -72,29 +75,29 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if code in codes:
         await update.message.reply_text(
-            "⚠️ *Duplicate Code*\nThis code already exists.",
-            parse_mode="Markdown"
+            escape_md("⚠️ Duplicate Code\nThis code already exists."),
+            parse_mode="MarkdownV2"
         )
         return
 
     codes[code] = {"text": custom_message, "used_by": None, "media": None}
     await update.message.reply_text(
-        f"✅ *Code Created Successfully!*\n\nCode: `{code}`\nMessage: {custom_message}",
-        parse_mode="Markdown"
+        f"✅ *Code Created Successfully!*\n\nCode: `{escape_md(code)}`\nMessage: {escape_md(custom_message)}",
+        parse_mode="MarkdownV2"
     )
 
 async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
-            "❌ *Unauthorized*\nYou do not have permission to generate codes.",
-            parse_mode="Markdown"
+            escape_md("❌ Unauthorized\nYou do not have permission to generate codes."),
+            parse_mode="MarkdownV2"
         )
         return
 
     if not update.message.reply_to_message:
         await update.message.reply_text(
-            "⚠️ *Usage Error*\nReply to a message (text, photo, document, etc.) with:\n`/generate_random <optional custom message>`",
-            parse_mode="Markdown"
+            escape_md("⚠️ Usage Error\nReply to a message (text, photo, document, etc.) with:\n/generate_random <optional custom message>"),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -133,8 +136,8 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         media = replied.text
     else:
         await update.message.reply_text(
-            "⚠️ Unsupported media type. Please reply to a text or supported media message.",
-            parse_mode="Markdown"
+            escape_md("⚠️ Unsupported media type. Please reply to a text or supported media message."),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -145,17 +148,15 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     await update.message.reply_text(
-        f"✅ *Random Code Created!*\n\nCode: `{code}`\nMessage: {custom_message if custom_message else 'No extra message.'}",
-        parse_mode="Markdown"
+        f"✅ *Random Code Created!*\n\nCode: `{escape_md(code)}`\nMessage: {escape_md(custom_message if custom_message else 'No extra message.')}",
+        parse_mode="MarkdownV2"
     )
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text(
-            "⚠️ *Invalid Usage*\n\n"
-            "Use this format:\n"
-            "`/redeem <code>`",
-            parse_mode="Markdown"
+            escape_md("⚠️ Invalid Usage\n\nUse this format:\n/redeem <code>"),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -164,15 +165,15 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if code not in codes:
         await update.message.reply_text(
-            "❌ *Invalid Code*\nThe code you entered does not exist.",
-            parse_mode="Markdown"
+            escape_md("❌ Invalid Code\nThe code you entered does not exist."),
+            parse_mode="MarkdownV2"
         )
         return
 
     if codes[code]["used_by"] is not None:
         await update.message.reply_text(
-            "❌ *Already Redeemed*\nThis code has already been used.",
-            parse_mode="Markdown"
+            escape_md("❌ Already Redeemed\nThis code has already been used."),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -187,8 +188,8 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         send_kwargs = {"chat_id": update.effective_chat.id}
         if text:
-            send_kwargs["caption"] = text
-            send_kwargs["parse_mode"] = "Markdown"
+            send_kwargs["caption"] = escape_md(text)
+            send_kwargs["parse_mode"] = "MarkdownV2"
 
         if media_type == "photo":
             await context.bot.send_photo(photo=file_id, **send_kwargs)
@@ -201,21 +202,21 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif media_type == "voice":
             await context.bot.send_voice(voice=file_id, **send_kwargs)
         elif media_type == "video_note":
-            await context.bot.send_video_note(video_note=file_id, **send_kwargs)
+            await context.bot.send_video_note(video_note=file_id)
         elif media_type == "text":
-            msg = file_id
+            msg = escape_md(file_id)
             if text:
-                msg += f"\n\n{text}"
-            await update.message.reply_text(msg, parse_mode="Markdown")
+                msg += f"\n\n{escape_md(text)}"
+            await update.message.reply_text(msg, parse_mode="MarkdownV2")
         else:
             await update.message.reply_text(
-                f"🎉 *Success!*\n\n{text}",
-                parse_mode="Markdown"
+                f"🎉 *Success!*\n\n{escape_md(text)}",
+                parse_mode="MarkdownV2"
             )
     else:
         await update.message.reply_text(
-            f"🎉 *Success!*\n\n{text}",
-            parse_mode="Markdown"
+            f"🎉 *Success!*\n\n{escape_md(text)}",
+            parse_mode="MarkdownV2"
         )
 
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,26 +224,24 @@ async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not codes:
         await update.message.reply_text(
-            "ℹ️ *No codes have been created yet.*",
-            parse_mode="Markdown"
+            escape_md("ℹ️ No codes have been created yet."),
+            parse_mode="MarkdownV2"
         )
         return
 
     message = "📋 *Redeem Codes List:*\n\n"
     for code, info in codes.items():
         status = "✅ Available" if info["used_by"] is None else f"❌ Redeemed by user `{info['used_by']}`"
-        message += f"• `{code}` — {status}\n"
-    await update.message.reply_text(message, parse_mode="Markdown")
+        message += f"• `{escape_md(code)}` — {escape_md(status)}\n"
+    await update.message.reply_text(message, parse_mode="MarkdownV2")
 
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if len(context.args) != 1:
         await update.message.reply_text(
-            "⚠️ *Invalid Usage*\n\n"
-            "Use:\n"
-            "`/deletecode <code>`",
-            parse_mode="Markdown"
+            escape_md("⚠️ Invalid Usage\n\nUse:\n/deletecode <code>"),
+            parse_mode="MarkdownV2"
         )
         return
 
@@ -250,15 +249,15 @@ async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if code not in codes:
         await update.message.reply_text(
-            "❌ *Code Not Found*\nPlease check the code and try again.",
-            parse_mode="Markdown"
+            escape_md("❌ Code Not Found\nPlease check the code and try again."),
+            parse_mode="MarkdownV2"
         )
         return
 
     del codes[code]
     await update.message.reply_text(
-        f"🗑️ *Code Deleted*\nCode `{code}` has been removed.",
-        parse_mode="Markdown"
+        f"🗑️ *Code Deleted*\nCode `{escape_md(code)}` has been removed.",
+        parse_mode="MarkdownV2"
     )
 
 # Flask app for hosting health check
