@@ -57,7 +57,7 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Forbidden:
         # Bot not admin or can't access channel
         await update.message.reply_text(
-            "⚠️ Bot is not an admin in the Force Join channel.\nPlease fix the configuration.",
+            "⚠️ Join @NECKsERA and Start the Bot.\nPlease Join Channel.",
             parse_mode="Markdown"
         )
         return False
