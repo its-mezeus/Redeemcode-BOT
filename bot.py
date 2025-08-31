@@ -7,6 +7,7 @@ from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import Forbidden, BadRequest
+from telegram.constants import ParseMode  # ✅ For HTML parse mode
 
 # Enable logging
 logging.basicConfig(
@@ -26,18 +27,18 @@ if not BOT_TOKEN or not ADMIN_IDS or not FORCE_JOIN_CHANNEL:
 codes = {}
 
 start_message_user = (
-    "👋 *Welcome to the Redeem Code Bot!*\n\n"
-    "*Use the command below to redeem your code:*\n\n"
-    "`/redeem <code>`\n\n"
+    "👋 <b>Welcome to the Redeem Code Bot!</b>\n\n"
+    "<b>Use the command below to redeem your code:</b>\n\n"
+    "<code>/redeem &lt;code&gt;</code>\n\n"
     "Enjoy! 🤍"
 )
 
 start_message_admin = (
-    "👋 *Welcome to the Redeem Code Bot!*\n\n"
-    "*Use the command below to redeem your code:*\n\n"
-    "`/redeem <code>`\n\n"
-    "*YOU ARE AN ADMIN OF THIS BOT 💗*\n"
-    "*You can access commands 👇*"
+    "👋 <b>Welcome to the Redeem Code Bot!</b>\n\n"
+    "<b>Use the command below to redeem your code:</b>\n\n"
+    "<code>/redeem &lt;code&gt;</code>\n\n"
+    "<b>YOU ARE AN ADMIN OF THIS BOT 💗</b>\n"
+    "<b>You can access commands 👇</b>"
 )
 
 # Helper: check admin
@@ -58,13 +59,13 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
         )
         await update.message.reply_text(
-            "⚠️ *You must join our channel to use this bot.*",
+            "⚠️ <b>You must join our channel to use this bot.</b>",
             reply_markup=join_button,
-            parse_mode="Markdown"
+            parse_mode=ParseMode.HTML
         )
         return False
     except Forbidden:
-        await update.message.reply_text("⚠️Join @NECKsERA and Start the Bot.\nJoin Channel and Try Again.")
+        await update.message.reply_text("⚠️ Bot is not admin in force join channel.")
         return False
 
 # Code Generator
@@ -81,11 +82,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(
             start_message_admin,
-            parse_mode="Markdown",
+            parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
     else:
-        await update.message.reply_text(start_message_user, parse_mode="Markdown")
+        await update.message.reply_text(start_message_user, parse_mode=ParseMode.HTML)
 
 # 📜 Show commands callback
 async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,13 +94,13 @@ async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     commands_text = (
-        "🛠 *Admin Commands:*\n\n"
-        "`/generate <code> <message>` — One-time code\n"
-        "`/generate_multi <code> <limit> <optional message>` — Multi-use code\n"
-        "`/generate_random <optional message>` — Random one-time (reply required)\n"
-        "`/redeem <code>` — Redeem a code\n"
-        "`/listcodes` — List all codes\n"
-        "`/deletecode <code>` — Delete a code"
+        "🛠 <b>Admin Commands:</b>\n\n"
+        "<code>/generate &lt;code&gt; &lt;message&gt;</code> — One-time code\n"
+        "<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code> — Multi-use code\n"
+        "<code>/generate_random &lt;optional message&gt;</code> — Random one-time (reply required)\n"
+        "<code>/redeem &lt;code&gt;</code> — Redeem a code\n"
+        "<code>/listcodes</code> — List all codes\n"
+        "<code>/deletecode &lt;code&gt;</code> — Delete a code"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -108,7 +109,7 @@ async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.edit_message_text(
         text=commands_text,
-        parse_mode="Markdown",
+        parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
 
@@ -123,41 +124,41 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.edit_message_text(
         text=start_message_admin,
-        parse_mode="Markdown",
+        parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
 
 # One-time use code
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode="Markdown")
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage:\n`/generate <code> <message>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage:\n<code>/generate &lt;code&gt; &lt;message&gt;</code>", parse_mode=ParseMode.HTML)
         return
 
     code = context.args[0].upper()
     custom_message = " ".join(context.args[1:])
 
     if code in codes:
-        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
         return
 
     codes[code] = {"text": custom_message, "used_by": None, "media": None}
-    await update.message.reply_text(f"✅ Code Created!\n\nCode: `{code}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
 # Multi-use code (with or without media)
 async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode="Markdown")
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
 
     if len(context.args) < 2:
         await update.message.reply_text(
-            "⚠️ Usage:\n`/generate_multi <code> <limit> <optional message>`\n\n"
+            "⚠️ Usage:\n<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code>\n\n"
             "You can also reply to a message with this command to attach media.",
-            parse_mode="Markdown"
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -165,13 +166,13 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         limit = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("⚠️ Limit must be a number", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Limit must be a number", parse_mode=ParseMode.HTML)
         return
 
     custom_message = " ".join(context.args[2:]) if len(context.args) > 2 else ""
 
     if code in codes:
-        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
         return
 
     media = None
@@ -209,18 +210,18 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     await update.message.reply_text(
-        f"✅ Multi-use Code Created!\n\nCode: `{code}`\nLimit: {limit}",
-        parse_mode="Markdown"
+        f"✅ Multi-use Code Created!\n\nCode: <code>{code}</code>\nLimit: {limit}",
+        parse_mode=ParseMode.HTML
     )
 
 # Random one-time code
 async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode="Markdown")
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
 
     if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Reply to a message with `/generate_random`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Reply to a message with <code>/generate_random</code>", parse_mode=ParseMode.HTML)
         return
 
     while True:
@@ -256,11 +257,11 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         media_type = "text"
         media = replied.text
     else:
-        await update.message.reply_text("⚠️ Unsupported media type", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Unsupported media type", parse_mode=ParseMode.HTML)
         return
 
     codes[code] = {"text": custom_message, "used_by": None, "media": {"type": media_type, "file_id": media}}
-    await update.message.reply_text(f"✅ Random Code Created!\n\nCode: `{code}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Random Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
 # Redeem command (supports single & multi-use)
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,7 +269,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage:\n`/redeem <code>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage:\n<code>/redeem &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
         return
 
     code = context.args[0].upper()
@@ -276,38 +277,38 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     if code not in codes:
-        await update.message.reply_text("❌ Invalid Code", parse_mode="Markdown")
+        await update.message.reply_text("❌ Invalid Code", parse_mode=ParseMode.HTML)
         return
 
     # Single-use code
     if codes[code].get("used_by") is None or isinstance(codes[code]["used_by"], int):
         if codes[code]["used_by"] is not None:
-            await update.message.reply_text("❌ Already Redeemed", parse_mode="Markdown")
+            await update.message.reply_text("❌ Already Redeemed", parse_mode=ParseMode.HTML)
             return
         codes[code]["used_by"] = user_id
 
     # Multi-use code
     else:
         if user_id in codes[code]["used_by"]:
-            await update.message.reply_text("❌ You already redeemed this code!", parse_mode="Markdown")
+            await update.message.reply_text("❌ You already redeemed this code!", parse_mode=ParseMode.HTML)
             return
         if len(codes[code]["used_by"]) >= codes[code]["limit"]:
-            await update.message.reply_text("❌ Code redemption limit reached!", parse_mode="Markdown")
+            await update.message.reply_text("❌ Code redemption limit reached!", parse_mode=ParseMode.HTML)
             return
         codes[code]["used_by"].append(user_id)
 
-    # Notify Admins
+    # ✅ Notify Admins (with clickable username)
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"🎉 *Code Redeemed!*\n\n"
-                    f"• Code: `{code}`\n"
-                    f"• User ID: `{user_id}`\n"
-                    f"• User: [{user.full_name}](tg://user?id={user_id})"
+                    f"🎉 <b>Code Redeemed!</b>\n\n"
+                    f"• Code: <code>{code}</code>\n"
+                    f"• User ID: <code>{user_id}</code>\n"
+                    f"• User: <a href=\"tg://user?id={user_id}\">{user.full_name}</a>"
                 ),
-                parse_mode="Markdown"
+                parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
@@ -323,7 +324,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         send_kwargs = {"chat_id": update.effective_chat.id}
         if text:
             send_kwargs["caption"] = text
-            send_kwargs["parse_mode"] = "Markdown"
+            send_kwargs["parse_mode"] = ParseMode.HTML
 
         if media_type == "photo":
             await context.bot.send_photo(photo=file_id, **send_kwargs)
@@ -341,44 +342,44 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = file_id
             if text:
                 msg += f"\n\n{text}"
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(f"🎉 Success!\n\n{text}", parse_mode="Markdown")
+        await update.message.reply_text(f"🎉 Success!\n\n{text}", parse_mode=ParseMode.HTML)
 
 # List all codes
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     if not codes:
-        await update.message.reply_text("ℹ️ No codes created yet.", parse_mode="Markdown")
+        await update.message.reply_text("ℹ️ No codes created yet.", parse_mode=ParseMode.HTML)
         return
 
-    message = "📋 *Redeem Codes List:*\n\n"
+    message = "📋 <b>Redeem Codes List:</b>\n\n"
     for code, info in codes.items():
         if isinstance(info["used_by"], list):  # multi-use
             used = len(info["used_by"])
             limit = info["limit"]
-            message += f"• `{code}` — {used}/{limit} used\n"
+            message += f"• <code>{code}</code> — {used}/{limit} used\n"
         else:  # single-use
-            status = "✅ Available" if info["used_by"] is None else f"❌ Redeemed by `{info['used_by']}`"
-            message += f"• `{code}` — {status}\n"
-    await update.message.reply_text(message, parse_mode="Markdown")
+            status = "✅ Available" if info["used_by"] is None else f"❌ Redeemed by <code>{info['used_by']}</code>"
+            message += f"• <code>{code}</code> — {status}\n"
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 # Delete a code
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage:\n`/deletecode <code>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage:\n<code>/deletecode &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
         return
 
     code = context.args[0].upper()
     if code not in codes:
-        await update.message.reply_text("❌ Code Not Found", parse_mode="Markdown")
+        await update.message.reply_text("❌ Code Not Found", parse_mode=ParseMode.HTML)
         return
 
     del codes[code]
-    await update.message.reply_text(f"🗑️ Code `{code}` deleted.", parse_mode="Markdown")
+    await update.message.reply_text(f"🗑️ Code <code>{code}</code> deleted.", parse_mode=ParseMode.HTML)
 
 # Flask app for hosting health check
 flask_app = Flask(__name__)
