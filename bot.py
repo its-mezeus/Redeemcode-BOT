@@ -149,7 +149,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "text": custom_message,
         "used_by": None,
         "media": None,
-        "created_by": update.effective_user.id   # ✅ store creator
+        "created_by": update.effective_user.id
     }
     await update.message.reply_text(f"✅ Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
@@ -212,7 +212,7 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "used_by": [],
         "limit": limit,
         "media": {"type": media_type, "file_id": media} if media else None,
-        "created_by": update.effective_user.id   # ✅ store creator
+        "created_by": update.effective_user.id
     }
 
     await update.message.reply_text(
@@ -270,7 +270,7 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "text": custom_message,
         "used_by": None,
         "media": {"type": media_type, "file_id": media},
-        "created_by": update.effective_user.id   # ✅ store creator
+        "created_by": update.effective_user.id
     }
     await update.message.reply_text(f"✅ Random Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
@@ -308,19 +308,23 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         codes[code]["used_by"].append(user_id)
 
-    # ✅ Notify only the creator of the code
+    # ✅ Notify only the creator of the code with a button
     creator_id = codes[code].get("created_by")
     if creator_id:
         try:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💬 Chat with User", url=f"tg://user?id={user_id}")]]
+            )
             await context.bot.send_message(
                 chat_id=creator_id,
                 text=(
                     f"🎉 <b>Code Redeemed!</b>\n\n"
                     f"• Code: <code>{code}</code>\n"
                     f"• User ID: <code>{user_id}</code>\n"
-                    f"• User: <a href=\"tg://user?id={user_id}\">{user.full_name}</a>"
+                    f"• User: {user.full_name}"
                 ),
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard
             )
         except Exception as e:
             logger.error(f"Failed to notify creator {creator_id}: {e}")
