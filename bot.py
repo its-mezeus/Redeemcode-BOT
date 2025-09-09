@@ -1,11 +1,11 @@
-# bot_with_termux_status_and_ping.py
+# bot_with_termux_status_and_styled_ping.py
 import os
 import random
 import string
 import logging
 import time
 from threading import Thread
-from typing import Optional, Set
+from typing import Set
 
 from flask import Flask, render_template_string, jsonify, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,14 +31,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------- Runtime state ----------
-codes = {}  # your existing codes store (in-memory)
+codes = {}  # in-memory codes store
 _start_time = time.time()
 
-# Helper: check admin
+# ---------- Helpers ----------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# Force Join Check (async)
+def generate_random_code(length=8):
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(random.choices(chars, k=length))
+
+def format_uptime(seconds: float) -> str:
+    s = int(seconds)
+    hours = s // 3600
+    mins = (s % 3600) // 60
+    secs = s % 60
+    if hours:
+        return f"{hours}h {mins}m {secs}s"
+    if mins:
+        return f"{mins}m {secs}s"
+    return f"{secs}s"
+
+def compute_active_users() -> int:
+    users: Set[int] = set()
+    for info in codes.values():
+        used_by = info.get("used_by")
+        if isinstance(used_by, list):
+            users.update(used_by)
+        elif isinstance(used_by, int):
+            users.add(used_by)
+    return len(users)
+
+# ---------- Force Join Check (async) ----------
 async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
     try:
@@ -46,7 +71,6 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if member.status in ["member", "administrator", "creator"]:
             return True
         else:
-            # present join button if not joined
             join_button = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
             )
@@ -73,12 +97,7 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("⚠️ Bot cannot check membership. Make sure the bot is an admin in the channel.", parse_mode=ParseMode.HTML)
         return False
 
-# Code generator
-def generate_random_code(length=8):
-    chars = string.ascii_uppercase + string.digits
-    return ''.join(random.choices(chars, k=length))
-
-# ---------- Telegram command handlers (same as your previous logic) ----------
+# ---------- Telegram Handlers ----------
 start_message_user = (
     "👋 <b>Welcome to the Redeem Code Bot!</b>\n\n"
     "<b>Use the command below to redeem your code:</b>\n\n"
@@ -110,7 +129,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     commands_text = (
         "🛠 <b>Admin Commands:</b>\n\n"
         "<code>/generate &lt;code&gt; &lt;message&gt;</code> — One-time code\n"
@@ -119,50 +137,30 @@ async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_T
         "<code>/redeem &lt;code&gt;</code> — Redeem a code\n"
         "<code>/listcodes</code> — List all codes\n"
         "<code>/deletecode &lt;code&gt;</code> — Delete a code\n"
-        "<code>/ping</code> — Check bot latency and uptime"
+        "<code>/ping</code> — System ping (latency + uptime)"
     )
-
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]]
-    )
-
-    await query.edit_message_text(
-        text=commands_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]])
+    await query.edit_message_text(text=commands_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]]
-    )
-
-    await query.edit_message_text(
-        text=start_message_admin,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]])
+    await query.edit_message_text(text=start_message_admin, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # One-time use code
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
-
     if len(context.args) < 2:
         await update.message.reply_text("⚠️ Usage:\n<code>/generate &lt;code&gt; &lt;message&gt;</code>", parse_mode=ParseMode.HTML)
         return
-
     code = context.args[0].upper()
     custom_message = " ".join(context.args[1:])
-
     if code in codes:
         await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
         return
-
     codes[code] = {
         "text": custom_message,
         "used_by": None,
@@ -176,31 +174,24 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
-
     if len(context.args) < 2:
         await update.message.reply_text(
-            "⚠️ Usage:\n<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code>\n\n"
-            "You can also reply to a message with this command to attach media.",
+            "⚠️ Usage:\n<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code>\n\nYou can also reply to a message with this command to attach media.",
             parse_mode=ParseMode.HTML
         )
         return
-
     code = context.args[0].upper()
     try:
         limit = int(context.args[1])
     except ValueError:
         await update.message.reply_text("⚠️ Limit must be a number", parse_mode=ParseMode.HTML)
         return
-
     custom_message = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-
     if code in codes:
         await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
         return
-
     media = None
     media_type = None
-
     if update.message.reply_to_message:
         replied = update.message.reply_to_message
         if replied.photo:
@@ -224,7 +215,6 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif replied.text:
             media_type = "text"
             media = replied.text
-
     codes[code] = {
         "text": custom_message,
         "used_by": [],
@@ -232,33 +222,24 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "media": {"type": media_type, "file_id": media} if media else None,
         "created_by": update.effective_user.id
     }
-
-    await update.message.reply_text(
-        f"✅ Multi-use Code Created!\n\nCode: <code>{code}</code>\nLimit: {limit}",
-        parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text(f"✅ Multi-use Code Created!\n\nCode: <code>{code}</code>\nLimit: {limit}", parse_mode=ParseMode.HTML)
 
 # Random one-time code
 async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
-
     if not update.message.reply_to_message:
         await update.message.reply_text("⚠️ Reply to a message with <code>/generate_random</code>", parse_mode=ParseMode.HTML)
         return
-
     while True:
         code = generate_random_code()
         if code not in codes:
             break
-
     custom_message = " ".join(context.args) if context.args else ""
     replied = update.message.reply_to_message
-
     media = None
     media_type = None
-
     if replied.photo:
         media_type = "photo"
         media = replied.photo[-1].file_id
@@ -283,7 +264,6 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Unsupported media type", parse_mode=ParseMode.HTML)
         return
-
     codes[code] = {
         "text": custom_message,
         "used_by": None,
@@ -292,30 +272,25 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     await update.message.reply_text(f"✅ Random Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
-# Redeem command (single & multi-use)
+# Redeem command
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_force_join(update, context):
         return
-
     if len(context.args) != 1:
         await update.message.reply_text("⚠️ Usage:\n<code>/redeem &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
         return
-
     code = context.args[0].upper()
     user = update.effective_user
     user_id = user.id
-
     if code not in codes:
         await update.message.reply_text("❌ Invalid Code", parse_mode=ParseMode.HTML)
         return
-
     # Single-use code
     if codes[code].get("used_by") is None or isinstance(codes[code]["used_by"], int):
         if codes[code]["used_by"] is not None:
             await update.message.reply_text("❌ Already Redeemed", parse_mode=ParseMode.HTML)
             return
         codes[code]["used_by"] = user_id
-
     # Multi-use code
     else:
         if user_id in codes[code]["used_by"]:
@@ -325,14 +300,11 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Code redemption limit reached!", parse_mode=ParseMode.HTML)
             return
         codes[code]["used_by"].append(user_id)
-
     # Notify creator
     creator_id = codes[code].get("created_by")
     if creator_id:
         try:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("💬 Chat with User", url=f"tg://user?id={user_id}")]]
-            )
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Chat with User", url=f"tg://user?id={user_id}")]])
             await context.bot.send_message(
                 chat_id=creator_id,
                 text=(
@@ -346,20 +318,16 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Failed to notify creator {creator_id}: {e}")
-
     # Deliver reward
     media = codes[code].get("media")
     text = codes[code]["text"]
-
     if media:
         media_type = media["type"]
         file_id = media["file_id"]
-
         send_kwargs = {"chat_id": update.effective_chat.id}
         if text:
             send_kwargs["caption"] = text
             send_kwargs["parse_mode"] = ParseMode.HTML
-
         if media_type == "photo":
             await context.bot.send_photo(photo=file_id, **send_kwargs)
         elif media_type == "video":
@@ -369,7 +337,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif media_type == "audio":
             await context.bot.send_audio(audio=file_id, **send_kwargs)
         elif media_type == "voice":
-            await context.bot.send_voice(voice= file_id, **send_kwargs)
+            await context.bot.send_voice(voice=file_id, **send_kwargs)
         elif media_type == "video_note":
             await context.bot.send_video_note(video_note=file_id, **send_kwargs)
         elif media_type == "text":
@@ -387,7 +355,6 @@ async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not codes:
         await update.message.reply_text("ℹ️ No codes created yet.", parse_mode=ParseMode.HTML)
         return
-
     message = "📋 <b>Redeem Codes List:</b>\n\n"
     for code, info in codes.items():
         if isinstance(info["used_by"], list):  # multi-use
@@ -406,27 +373,47 @@ async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("⚠️ Usage:\n<code>/deletecode &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
         return
-
     code = context.args[0].upper()
     if code not in codes:
         await update.message.reply_text("❌ Code Not Found", parse_mode=ParseMode.HTML)
         return
-
     del codes[code]
     await update.message.reply_text(f"🗑️ Code <code>{code}</code> deleted.", parse_mode=ParseMode.HTML)
 
-# ---------- New: Ping command ----------
+# ---------- New: Styled Ping command ----------
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Replies with round-trip latency and uptime.
+    Replies with styled system ping + uptime (monospace block like your screenshot).
     """
     try:
         start = time.perf_counter()
-        # send a temporary message to measure round-trip
         sent = await update.message.reply_text("🏓 Pinging...")
         elapsed = (time.perf_counter() - start) * 1000  # ms
+
+        # status category similar to the screenshot
+        if elapsed < 150:
+            status = "Excellent ⚡"
+        elif elapsed < 300:
+            status = "Good ✅"
+        elif elapsed < 600:
+            status = "Moderate ⚠️"
+        else:
+            status = "Poor ❌"
+
         uptime = format_uptime(time.time() - _start_time)
-        await sent.edit_text(f"🏓 Pong!\nLatency: {elapsed:.0f} ms\nUptime: {uptime}")
+
+        # build nicely aligned mono block using fixed-width characters and spacing
+        # note: HTML <code> preserves spacing in Telegram
+        response_ms = f"{int(elapsed)} ms"
+        # pad the labels for alignment - keep it simple and safe for varying widths
+        text = (
+            "<code>[ SYSTEM PING ]</code>\n\n"
+            f"<code>≡ Response : {response_ms}</code>\n"
+            f"<code>≡ Status   : {status}</code>\n"
+            f"<code>≡ Uptime   : {uptime}</code>"
+        )
+
+        await sent.edit_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"/ping failed: {e}")
         await update.message.reply_text("⚠️ Unable to measure ping right now.")
@@ -536,7 +523,6 @@ STATUS_HTML = r"""
     'ready. welcome to {bot_name}\\n'
   ];
 
-  // fetch status and start animation
   async function fetchAndStart() {
     try {
       const res = await fetch('/status');
@@ -544,7 +530,6 @@ STATUS_HTML = r"""
       const lines = lines_template.map(l => l.replace('{chan}', json.force_channel).replace('{bot_name}', json.bot_name).replace('{codes_count}', json.codes_count));
       startTypewriter(lines, json);
     } catch (e) {
-      // fallback static lines
       startTypewriter(['failed to fetch /status\\n', 'running with fallback values\\n']);
     }
   }
@@ -555,7 +540,6 @@ STATUS_HTML = r"""
     const pct = document.getElementById('percent');
     const ptext = document.getElementById('progressText');
 
-    // fill stats if status provided
     if (status) {
       document.getElementById('uptime').innerText = status.uptime;
       document.getElementById('version').innerText = status.version;
@@ -588,7 +572,6 @@ STATUS_HTML = r"""
         if (pos >= line.length) {
           clearInterval(iv);
           li += 1;
-          // small pause between lines
           setTimeout(typeNextLine, 220 + Math.random() * 220);
         }
       }, speed);
@@ -596,7 +579,6 @@ STATUS_HTML = r"""
     typeNextLine();
   }
 
-  // Buttons (protected endpoints)
   document.getElementById('restartBtn').addEventListener('click', async () => {
     if (!confirm('Restart Bot? (this will call a protected endpoint)')) return;
     const resp = await fetch('/restart', {
@@ -623,32 +605,8 @@ STATUS_HTML = r"""
 </html>
 """
 
-# Helper to compute uptime string
-def format_uptime(seconds: float) -> str:
-    s = int(seconds)
-    hours = s // 3600
-    mins = (s % 3600) // 60
-    secs = s % 60
-    if hours:
-        return f"{hours}h {mins}m {secs}s"
-    if mins:
-        return f"{mins}m {secs}s"
-    return f"{secs}s"
-
-# Count active users from codes store (simple heuristic)
-def compute_active_users() -> int:
-    users: Set[int] = set()
-    for info in codes.values():
-        used_by = info.get("used_by")
-        if isinstance(used_by, list):
-            users.update(used_by)
-        elif isinstance(used_by, int):
-            users.add(used_by)
-    return len(users)
-
 @flask_app.route("/")
 def home():
-    # inject the secret into the template in a safe-ish way (render_template_string)
     rendered = render_template_string(STATUS_HTML, WEB_SECRET=WEB_SECRET)
     return Response(rendered, mimetype="text/html")
 
@@ -665,7 +623,6 @@ def status():
         "codes_count": len(codes)
     })
 
-# Protected endpoints (placeholders)
 def _check_secret(req_json):
     if not WEB_SECRET:
         return False
@@ -676,7 +633,6 @@ def http_restart():
     data = request.get_json(silent=True) or {}
     if not _check_secret(data):
         return jsonify({"ok": False, "message": "unauthorized"}), 401
-    # PLACEHOLDER: implement your restart logic here if you want
     logger.info("Received /restart via HTTP - secret validated (no restart performed, placeholder).")
     return jsonify({"ok": True, "message": "restart endpoint received (placeholder)."}), 200
 
@@ -685,13 +641,11 @@ def http_open():
     data = request.get_json(silent=True) or {}
     if not _check_secret(data):
         return jsonify({"ok": False, "message": "unauthorized"}), 401
-    # PLACEHOLDER: implement logic to "open" the bot/admin panel
     logger.info("Received /open via HTTP - secret validated (placeholder).")
     return jsonify({"ok": True, "message": "open endpoint received (placeholder)."}), 200
 
 def run_flask():
     port = int(os.getenv("PORT", "5000"))
-    # Bind to 0.0.0.0 for Render
     flask_app.run(host="0.0.0.0", port=port, threaded=True)
 
 def main():
@@ -706,7 +660,7 @@ def main():
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
-    app.add_handler(CommandHandler("ping", ping))  # <-- Ping command added
+    app.add_handler(CommandHandler("ping", ping))  # styled ping added
 
     Thread(target=run_flask, daemon=True).start()
 
