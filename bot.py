@@ -5,7 +5,7 @@ import string
 import logging
 import time
 from threading import Thread
-from typing import Set, Dict, Any
+from typing import Set, Dict, Any, List
 
 from flask import Flask, render_template_string, jsonify, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,12 +23,14 @@ from telegram.constants import ParseMode  # For HTML parse mode
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL")  # e.g. @mychannel
+# FORCE_JOIN_CHANNEL is now an optional starting list of channels (comma-separated)
+FORCE_JOIN_CHANNEL_ENV = os.getenv("FORCE_JOIN_CHANNEL", "")
 WEB_SECRET = os.getenv("WEB_SECRET", "")  # secret token for protected HTTP endpoints (restart/open)
 BOT_VERSION = os.getenv("BOT_VERSION", "v1.0")
 
-if not BOT_TOKEN or not ADMIN_IDS or not FORCE_JOIN_CHANNEL:
-    raise ValueError("Missing BOT_TOKEN, ADMIN_IDS, or FORCE_JOIN_CHANNEL environment variables!")
+if not BOT_TOKEN or not ADMIN_IDS:
+    # Relaxed check: FORCE_JOIN_CHANNEL is now optional
+    raise ValueError("Missing BOT_TOKEN or ADMIN_IDS environment variables!")
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -42,6 +44,14 @@ codes: Dict[str, Dict[str, Any]] = {}  # in-memory codes store
 _start_time = time.time()
 # pending screenshot requests: maps user_id -> {"code": code, "creator_id": id, "requested_at": timestamp}
 pending_screenshots: Dict[int, Dict[str, Any]] = {}
+
+# New global state for multiple force join channels (using a Set for uniqueness and O(1) checks)
+# Initialize from environment variable
+FORCE_CHANNELS: Set[str] = set(
+    f"@{x.lstrip('@')}"
+    for x in FORCE_JOIN_CHANNEL_ENV.split(",")
+    if x.strip()
+)
 
 # ---------- Helpers ----------
 def is_admin(user_id: int) -> bool:
@@ -72,39 +82,50 @@ def compute_active_users() -> int:
             users.add(used_by)
     return len(users)
 
-# ---------- Force Join Check (async) ----------
+# ---------- Force Join Check (async) - Updated for multiple channels ----------
 async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not FORCE_CHANNELS:
+        return True # No channels required
+    
     user_id = update.effective_user.id
-    try:
-        member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
-        else:
-            join_button = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
-            )
+    missing_channels: List[str] = []
+
+    for channel in FORCE_CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(channel, user_id)
+            if member.status not in ["member", "administrator", "creator"]:
+                missing_channels.append(channel)
+        except BadRequest:
+            # Assume not joined if BadRequest occurs (e.g., user blocked bot in channel, or invalid channel)
+            missing_channels.append(channel)
+        except Forbidden:
+            # Bot is not an admin in the channel, cannot check membership
             if update.message:
                 await update.message.reply_text(
-                    "⚠️ <b>You must join our channel to use this bot.</b>",
-                    reply_markup=join_button,
+                    f"⚠️ Bot cannot check membership for {channel}. Make sure the bot is an admin in the channel.", 
                     parse_mode=ParseMode.HTML
                 )
             return False
-    except BadRequest:
-        join_button = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+
+    if not missing_channels:
+        return True
+    
+    # Construct a message with buttons for all missing channels
+    join_buttons = []
+    for channel in missing_channels:
+        channel_name = channel.lstrip('@')
+        join_buttons.append([InlineKeyboardButton(f"📢 Join {channel}", url=f"https://t.me/{channel_name}")]
+    )
+    
+    keyboard = InlineKeyboardMarkup(join_buttons)
+    
+    if update.message:
+        await update.message.reply_text(
+            "⚠️ <b>You must join the required channel(s) to use this bot.</b>",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )
-        if update.message:
-            await update.message.reply_text(
-                "⚠️ <b>You must join our channel to use this bot.</b>",
-                reply_markup=join_button,
-                parse_mode=ParseMode.HTML
-            )
-        return False
-    except Forbidden:
-        if update.message:
-            await update.message.reply_text("⚠️ Bot cannot check membership. Make sure the bot is an admin in the channel.", parse_mode=ParseMode.HTML)
-        return False
+    return False
 
 # ---------- Telegram Handlers ----------
 start_message_user = (
@@ -140,12 +161,18 @@ async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     commands_text = (
         "🛠 <b>Admin Commands:</b>\n\n"
+        "<u>Code Management:</u>\n"
         "<code>/generate &lt;code&gt; &lt;message&gt;</code> — One-time code\n"
         "<code>/generate_multi &lt;code&gt; &lt;limit&gt; &lt;optional message&gt;</code> — Multi-use code\n"
         "<code>/generate_random &lt;optional message&gt;</code> — Random one-time (reply required)\n"
         "<code>/redeem &lt;code&gt;</code> — Redeem a code\n"
         "<code>/listcodes</code> — List all codes\n"
-        "<code>/deletecode &lt;code&gt;</code> — Delete a code\n"
+        "<code>/deletecode &lt;code&gt;</code> — Delete a code\n\n"
+        "<u>Channel Management:</u>\n"
+        "<code>/addchannel &lt;@channel&gt;</code> — Add force-join channel\n"
+        "<code>/delchannel &lt;@channel&gt;</code> — Delete force-join channel\n"
+        "<code>/viewchannels</code> — List force-join channels\n\n"
+        "<u>System:</u>\n"
         "<code>/ping</code> — System ping (latency + uptime)"
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]])
@@ -156,6 +183,77 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]])
     await query.edit_message_text(text=start_message_admin, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# --- Dynamic Channel Management Handlers ---
+
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage:\n<code>/addchannel &lt;@channel_username&gt;</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    channel = context.args[0].strip()
+    if not channel.startswith('@'):
+        channel = f"@{channel}"
+    
+    global FORCE_CHANNELS
+    if channel in FORCE_CHANNELS:
+        await update.message.reply_text(f"⚠️ Channel <code>{channel}</code> is already in the list.", parse_mode=ParseMode.HTML)
+        return
+
+    # Optional: Check if the bot can actually access the channel (requires bot to be an admin)
+    try:
+        await context.bot.get_chat(channel)
+    except BadRequest:
+        await update.message.reply_text(f"❌ Invalid Channel Username <code>{channel}</code> or bot is not a member/admin.", parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        logger.error(f"Error checking channel {channel}: {e}")
+        await update.message.reply_text(f"⚠️ An error occurred while checking channel <code>{channel}</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    FORCE_CHANNELS.add(channel)
+    await update.message.reply_text(f"✅ Channel <code>{channel}</code> added to force-join list.", parse_mode=ParseMode.HTML)
+
+async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage:\n<code>/delchannel &lt;@channel_username&gt;</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    channel = context.args[0].strip()
+    if not channel.startswith('@'):
+        channel = f"@{channel}"
+    
+    global FORCE_CHANNELS
+    if channel not in FORCE_CHANNELS:
+        await update.message.reply_text(f"⚠️ Channel <code>{channel}</code> is not in the list.", parse_mode=ParseMode.HTML)
+        return
+
+    FORCE_CHANNELS.remove(channel)
+    await update.message.reply_text(f"🗑️ Channel <code>{channel}</code> removed from force-join list.", parse_mode=ParseMode.HTML)
+
+async def view_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        return
+
+    if not FORCE_CHANNELS:
+        await update.message.reply_text("ℹ️ No force-join channels currently set.", parse_mode=ParseMode.HTML)
+        return
+
+    message = "📣 <b>Current Force-Join Channels:</b>\n\n"
+    for channel in sorted(list(FORCE_CHANNELS)):
+        message += f"• <code>{channel}</code>\n"
+
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+
+
+# --- Existing Admin Handlers (omitted for brevity, assume unchanged for generate/list/delete/ping) ---
 
 # One-time use code
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,99 +379,6 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     await update.message.reply_text(f"✅ Random Code Created!\n\nCode: <code>{code}</code>", parse_mode=ParseMode.HTML)
 
-# ---------- Screenshot / Proof handling ----------
-async def send_screenshot_request(chat_id: int, code: str, context: ContextTypes.DEFAULT_TYPE, reply_to_message_id: int = None):
-    """Send an inline button to the user asking them to upload a screenshot/proof.
-    If reply_to_message_id is provided, the message will be sent as a reply to that message (so the keyboard appears attached).
-    """
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📸 Send Screenshot", callback_data=f"request_screenshot:{code}")],
-            [InlineKeyboardButton("✖️ Cancel", callback_data=f"cancel_screenshot:{code}")]
-        ]
-    )
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="If you have a screenshot/proof, please send it to verify your claim.\n(Click the button below to start)",
-        reply_markup=keyboard,
-        reply_to_message_id=reply_to_message_id
-    )
-
-async def request_screenshot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    data = query.data  # expected: request_screenshot:<CODE>
-    try:
-        code = data.split(':', 1)[1]
-    except Exception:
-        await query.message.reply_text("⚠️ Invalid request.")
-        return
-    if code not in codes:
-        await query.message.reply_text("⚠️ This code is unknown or expired.")
-        return
-    creator_id = codes.get(code, {}).get("created_by")
-    pending_screenshots[user.id] = {"code": code, "creator_id": creator_id, "requested_at": time.time()}
-    await query.message.reply_text("📸 Please send a photo (screenshot) in this chat now. I'll forward it to the code creator.")
-
-async def cancel_screenshot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    if user.id in pending_screenshots:
-        del pending_screenshots[user.id]
-        await query.message.reply_text("❌ Screenshot request cancelled.")
-    else:
-        await query.message.reply_text("ℹ️ No pending screenshot request to cancel.")
-
-async def handle_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    user = update.effective_user
-    if user.id not in pending_screenshots:
-        # optional: ignore silently or inform user
-        await message.reply_text("ℹ️ If you want to send proof for a redeemed code, click the 'Send Screenshot' button under your reward first.")
-        return
-    info = pending_screenshots.pop(user.id)
-    code = info.get('code')
-    creator_id = info.get('creator_id')
-
-    caption = (
-        f"📸 <b>Screenshot / Proof Received</b>\n\n"
-        f"• Code: <code>{code}</code>\n"
-        f"• From: <code>{user.id}</code> — {user.full_name}\n"
-        f"• Chat: <code>{message.chat.id}</code>"
-    )
-
-    try:
-        # prefer sending original photo file
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            # forward to creator if exists
-            if creator_id:
-                await context.bot.send_photo(chat_id=creator_id, photo=file_id, caption=caption, parse_mode=ParseMode.HTML)
-            else:
-                # if creator is unknown, inform the sender (do not broadcast to all admins)
-                await message.reply_text("⚠️ Unable to forward: the code creator is unknown. Please contact support/admin.")
-                return
-        elif message.document and (message.document.mime_type or '').startswith('image'):
-            file_id = message.document.file_id
-            if creator_id:
-                await context.bot.send_document(chat_id=creator_id, document=file_id, caption=caption, parse_mode=ParseMode.HTML)
-            else:
-                await message.reply_text("⚠️ Unable to forward: the code creator is unknown. Please contact support/admin.")
-                return
-        else:
-            # unsupported type
-            await message.reply_text("⚠️ Unsupported file type. Please send a photo or image file.")
-            return
-
-        # Do NOT notify all admins. Only the code creator receives the proof as requested.
-
-        await message.reply_text("✅ Screenshot received and forwarded to the code creator. Thank you!")
-    except Exception as e:
-        logger.error(f"Failed to process incoming screenshot: {e}")
-        await message.reply_text("⚠️ Failed to forward screenshot. Please try again later.")
-
 # Redeem command
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_force_join(update, context):
@@ -473,6 +478,8 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_to = None
         if hasattr(context, 'user_data') and isinstance(context.user_data, dict):
             reply_to = context.user_data.pop('last_reward_message_id', None)
+        # Note: Screenshot handlers (request_screenshot_callback, cancel_screenshot_callback, handle_incoming_image) are omitted for brevity, but exist and work as before.
+        # Calling the send_screenshot_request function:
         await send_screenshot_request(update.effective_chat.id, code, context, reply_to_message_id=reply_to)
     except Exception as e:
         logger.error(f"Failed to send screenshot request button: {e}")
@@ -509,7 +516,7 @@ async def deletecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del codes[code]
     await update.message.reply_text(f"🗑️ Code <code>{code}</code> deleted.", parse_mode=ParseMode.HTML)
 
-# ---------- New: Styled Ping command ----------
+# Styled Ping command
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Replies with styled system ping + uptime (monospace block like your screenshot).
@@ -547,7 +554,99 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"/ping failed: {e}")
         await update.message.reply_text("⚠️ Unable to measure ping right now.")
 
-# ---------- Flask status page & endpoints ----------
+
+# --- Screenshot / Proof handling (restored from original code) ---
+
+async def send_screenshot_request(chat_id: int, code: str, context: ContextTypes.DEFAULT_TYPE, reply_to_message_id: int = None):
+    """Send an inline button to the user asking them to upload a screenshot/proof."""
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📸 Send Screenshot", callback_data=f"request_screenshot:{code}")],
+            [InlineKeyboardButton("✖️ Cancel", callback_data=f"cancel_screenshot:{code}")]
+        ]
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="If you have a screenshot/proof, please send it to verify your claim.\n(Click the button below to start)",
+        reply_markup=keyboard,
+        reply_to_message_id=reply_to_message_id
+    )
+
+async def request_screenshot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = query.data  # expected: request_screenshot:<CODE>
+    try:
+        code = data.split(':', 1)[1]
+    except Exception:
+        await query.message.reply_text("⚠️ Invalid request.")
+        return
+    if code not in codes:
+        await query.message.reply_text("⚠️ This code is unknown or expired.")
+        return
+    creator_id = codes.get(code, {}).get("created_by")
+    pending_screenshots[user.id] = {"code": code, "creator_id": creator_id, "requested_at": time.time()}
+    await query.message.reply_text("📸 Please send a photo (screenshot) in this chat now. I'll forward it to the code creator.")
+
+async def cancel_screenshot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    if user.id in pending_screenshots:
+        del pending_screenshots[user.id]
+        await query.message.reply_text("❌ Screenshot request cancelled.")
+    else:
+        await query.message.reply_text("ℹ️ No pending screenshot request to cancel.")
+
+async def handle_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user = update.effective_user
+    if user.id not in pending_screenshots:
+        # optional: ignore silently or inform user
+        await message.reply_text("ℹ️ If you want to send proof for a redeemed code, click the 'Send Screenshot' button under your reward first.")
+        return
+    info = pending_screenshots.pop(user.id)
+    code = info.get('code')
+    creator_id = info.get('creator_id')
+
+    caption = (
+        f"📸 <b>Screenshot / Proof Received</b>\n\n"
+        f"• Code: <code>{code}</code>\n"
+        f"• From: <code>{user.id}</code> — {user.full_name}\n"
+        f"• Chat: <code>{message.chat.id}</code>"
+    )
+
+    try:
+        # prefer sending original photo file
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            # forward to creator if exists
+            if creator_id:
+                await context.bot.send_photo(chat_id=creator_id, photo=file_id, caption=caption, parse_mode=ParseMode.HTML)
+            else:
+                # if creator is unknown, inform the sender (do not broadcast to all admins)
+                await message.reply_text("⚠️ Unable to forward: the code creator is unknown. Please contact support/admin.")
+                return
+        elif message.document and (message.document.mime_type or '').startswith('image'):
+            file_id = message.document.file_id
+            if creator_id:
+                await context.bot.send_document(chat_id=creator_id, document=file_id, caption=caption, parse_mode=ParseMode.HTML)
+            else:
+                await message.reply_text("⚠️ Unable to forward: the code creator is unknown. Please contact support/admin.")
+                return
+        else:
+            # unsupported type
+            await message.reply_text("⚠️ Unsupported file type. Please send a photo or image file.")
+            return
+
+        await message.reply_text("✅ Screenshot received and forwarded to the code creator. Thank you!")
+    except Exception as e:
+        logger.error(f"Failed to process incoming screenshot: {e}")
+        await message.reply_text("⚠️ Failed to forward screenshot. Please try again later.")
+
+
+# ---------- Flask status page & endpoints - Updated for multi-channel info ----------
 flask_app = Flask(__name__)
 
 STATUS_HTML = r"""
@@ -634,7 +733,7 @@ STATUS_HTML = r"""
           <div class="stat"><b id="uptime">—</b>Uptime</div>
           <div class="stat"><b id="version">—</b>Version</div>
           <div class="stat"><b id="users">—</b>Active Users</div>
-          <div class="stat"><b id="chan">—</b>Force Join Channel</div>
+          <div class="stat"><b id="chan">—</b>Channels Required</div>
         </div>
       </div>
     </div>
@@ -644,7 +743,7 @@ STATUS_HTML = r"""
   const lines_template = [
     'booting termux-emulator...\\n',
     'loading modules: telegram-core, flask-host\\n',
-    'checking force-join channel: {chan}\\n',
+    'checking force-join channels... {chan_count} found\\n',
     'verifying token... OK\\n',
     'starting webhook / polling... OK\\n',
     'initializing redeem subsystem...\\n',
@@ -656,7 +755,7 @@ STATUS_HTML = r"""
     try {
       const res = await fetch('/status');
       const json = await res.json();
-      const lines = lines_template.map(l => l.replace('{chan}', json.force_channel).replace('{bot_name}', json.bot_name).replace('{codes_count}', json.codes_count));
+      const lines = lines_template.map(l => l.replace('{chan_count}', json.force_channel_count).replace('{bot_name}', json.bot_name).replace('{codes_count}', json.codes_count));
       startTypewriter(lines, json);
     } catch (e) {
       startTypewriter(['failed to fetch /status\\n', 'running with fallback values\\n']);
@@ -673,7 +772,7 @@ STATUS_HTML = r"""
       document.getElementById('uptime').innerText = status.uptime;
       document.getElementById('version').innerText = status.version;
       document.getElementById('users').innerText = status.active_users;
-      document.getElementById('chan').innerText = status.force_channel;
+      document.getElementById('chan').innerText = status.force_channel_count;
     }
 
     let li = 0;
@@ -747,7 +846,7 @@ def status():
         "uptime": uptime,
         "version": BOT_VERSION,
         "active_users": active_users,
-        "force_channel": FORCE_JOIN_CHANNEL,
+        "force_channel_count": len(FORCE_CHANNELS), # Changed to count
         "bot_name": "Redeem Code Bot",
         "codes_count": len(codes)
     })
@@ -780,21 +879,30 @@ def run_flask():
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Base commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(show_commands_callback, pattern="show_commands"))
-    app.add_handler(CallbackQueryHandler(back_to_start_callback, pattern="back_to_start"))
+    app.add_handler(CommandHandler("redeem", redeem))
+    app.add_handler(CommandHandler("ping", ping))
+
+    # Admin Code Management
     app.add_handler(CommandHandler("generate", generate))
     app.add_handler(CommandHandler("generate_multi", generate_multi))
     app.add_handler(CommandHandler("generate_random", generate_random))
-    app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
-    app.add_handler(CommandHandler("ping", ping))  # styled ping added
 
-    # screenshot callbacks and handlers
+    # Admin Channel Management (NEW)
+    app.add_handler(CommandHandler("addchannel", add_channel))
+    app.add_handler(CommandHandler("delchannel", del_channel))
+    app.add_handler(CommandHandler("viewchannels", view_channels))
+
+    # Admin Button Callbacks
+    app.add_handler(CallbackQueryHandler(show_commands_callback, pattern="show_commands"))
+    app.add_handler(CallbackQueryHandler(back_to_start_callback, pattern="back_to_start"))
+    
+    # Screenshot handlers
     app.add_handler(CallbackQueryHandler(request_screenshot_callback, pattern=r"^request_screenshot:"))
     app.add_handler(CallbackQueryHandler(cancel_screenshot_callback, pattern=r"^cancel_screenshot:"))
-    # handle incoming photos or image documents
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_incoming_image))
 
     Thread(target=run_flask, daemon=True).start()
