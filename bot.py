@@ -114,7 +114,7 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     join_buttons = []
     for channel in missing_channels:
         channel_name = channel.lstrip('@')
-        join_buttons.append([InlineKeyboardButton(f"📢 Join {channel}", url=f"https://t.me/{channel_name}")]
+        join_buttons.append([InlineKeyboardButton(f"📢 Join Here", url=f"https://t.me/{channel_name}")]
     )
     
     keyboard = InlineKeyboardMarkup(join_buttons)
