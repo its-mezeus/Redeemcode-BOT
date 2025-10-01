@@ -114,8 +114,7 @@ async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     join_buttons = []
     for channel in missing_channels:
         channel_name = channel.lstrip('@')
-        join_buttons.append([InlineKeyboardButton(f"📢 Join Here", url=f"https://t.me/{channel_name}")]
-    )
+        join_buttons.append([InlineKeyboardButton(f"📢 Join {channel}", url=f"https://t.me/{channel_name}")])
     
     keyboard = InlineKeyboardMarkup(join_buttons)
     
@@ -253,7 +252,7 @@ async def view_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 
-# --- Existing Admin Handlers (omitted for brevity, assume unchanged for generate/list/delete/ping) ---
+# --- Existing Admin Handlers ---
 
 # One-time use code
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,7 +477,6 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_to = None
         if hasattr(context, 'user_data') and isinstance(context.user_data, dict):
             reply_to = context.user_data.pop('last_reward_message_id', None)
-        # Note: Screenshot handlers (request_screenshot_callback, cancel_screenshot_callback, handle_incoming_image) are omitted for brevity, but exist and work as before.
         # Calling the send_screenshot_request function:
         await send_screenshot_request(update.effective_chat.id, code, context, reply_to_message_id=reply_to)
     except Exception as e:
@@ -555,7 +553,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Unable to measure ping right now.")
 
 
-# --- Screenshot / Proof handling (restored from original code) ---
+# --- Screenshot / Proof handling ---
 
 async def send_screenshot_request(chat_id: int, code: str, context: ContextTypes.DEFAULT_TYPE, reply_to_message_id: int = None):
     """Send an inline button to the user asking them to upload a screenshot/proof."""
@@ -646,7 +644,7 @@ async def handle_incoming_image(update: Update, context: ContextTypes.DEFAULT_TY
         await message.reply_text("⚠️ Failed to forward screenshot. Please try again later.")
 
 
-# ---------- Flask status page & endpoints - Updated for multi-channel info ----------
+# ---------- Flask status page & endpoints - Updated for direct Open Bot link ----------
 flask_app = Flask(__name__)
 
 STATUS_HTML = r"""
@@ -666,7 +664,19 @@ STATUS_HTML = r"""
     .termux-logo{font-family:var(--mono);font-weight:700;color:var(--accent);letter-spacing:1px;font-size:34px;text-transform:uppercase}
     .meta{font-size:13px;color:var(--muted);text-align:center}
     .btn-row{display:flex;gap:8px}
-    .btn{padding:8px 10px;border-radius:10px;background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted);font-size:13px;cursor:pointer}
+    /* Updated styles for <a> tag to look like button */
+    .btn, .btn-link {
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: transparent;
+        border: 1px solid rgba(255,255,255,0.04);
+        color: var(--muted);
+        font-size: 13px;
+        cursor: pointer;
+        text-decoration: none; /* For link */
+        text-align: center;
+        display: inline-block;
+    }
     .btn.primary{background:linear-gradient(90deg, rgba(0,209,255,0.08), rgba(0,150,255,0.04));border:1px solid rgba(0,209,255,0.14);color:var(--accent)}
     .terminal{background:#001014;border-radius:10px;padding:18px;box-shadow:inset 0 2px 4px rgba(0,0,0,0.6);height:260px;overflow:hidden;border:1px solid rgba(255,255,255,0.02)}
     .term-top{display:flex;gap:8px;align-items:center;margin-bottom:8px}
@@ -704,7 +714,7 @@ STATUS_HTML = r"""
         </div>
         <div class="btn-row" style="margin-top:8px">
           <button class="btn primary" id="restartBtn">Restart Bot</button>
-          <button class="btn" id="openBtn">Open Bot</button>
+          <a href="tg://resolve?domain=zeusopstore_bot" target="_blank" class="btn">Open Bot</a>
         </div>
       </div>
 
@@ -817,15 +827,7 @@ STATUS_HTML = r"""
     const j = await resp.json();
     alert(j.message || 'ok');
   });
-  document.getElementById('openBtn').addEventListener('click', async () => {
-    const resp = await fetch('/open', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({secret: '{{WEB_SECRET}}'})
-    });
-    const j = await resp.json();
-    alert(j.message || 'ok');
-  });
+  // The 'Open Bot' JavaScript handler has been removed as it's now a direct HTML link.
 
   fetchAndStart();
 </script>
@@ -864,6 +866,8 @@ def http_restart():
     logger.info("Received /restart via HTTP - secret validated (no restart performed, placeholder).")
     return jsonify({"ok": True, "message": "restart endpoint received (placeholder)."}), 200
 
+# The /open Flask route is no longer strictly necessary if the button is a direct link, 
+# but we leave it as a placeholder just in case:
 @flask_app.route("/open", methods=["POST"])
 def http_open():
     data = request.get_json(silent=True) or {}
