@@ -53,9 +53,16 @@ FORCE_CHANNELS: Set[str] = set(
     if x.strip()
 )
 
+# NEW: Set to store IDs of banned users (in-memory, non-persistent)
+BANNED_USERS: Set[int] = set()
+
 # ---------- Helpers ----------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+# NEW: Check if a user is banned
+def is_banned(user_id: int) -> bool:
+    return user_id in BANNED_USERS
 
 def generate_random_code(length=8):
     chars = string.ascii_uppercase + string.digits
@@ -171,6 +178,10 @@ async def show_commands_callback(update: Update, context: ContextTypes.DEFAULT_T
         "<code>/addchannel &lt;@channel&gt;</code> — Add force-join channel\n"
         "<code>/delchannel &lt;@channel&gt;</code> — Delete force-join channel\n"
         "<code>/viewchannels</code> — List force-join channels\n\n"
+        "<u>Ban Management:</u>\n" # NEW: Ban Management section
+        "<code>/ban &lt;user_id&gt;</code> — Ban a user from using the bot\n"
+        "<code>/unban &lt;user_id&gt;</code> — Unban a user\n"
+        "<code>/listbanned</code> — List all banned users\n\n"
         "<u>System:</u>\n"
         "<code>/ping</code> — System ping (latency + uptime)"
     )
@@ -380,17 +391,25 @@ async def generate_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Redeem command
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    
+    # NEW: Check if user is banned before proceeding
+    if is_banned(user_id):
+        await update.message.reply_text("🚫 **You have been banned** from using this bot.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
     if not await check_force_join(update, context):
         return
     if len(context.args) != 1:
         await update.message.reply_text("⚠️ Usage:\n<code>/redeem &lt;code&gt;</code>", parse_mode=ParseMode.HTML)
         return
     code = context.args[0].upper()
-    user = update.effective_user
-    user_id = user.id
+    
     if code not in codes:
         await update.message.reply_text("❌ Invalid Code", parse_mode=ParseMode.HTML)
         return
+    
     # Single-use code
     if codes[code].get("used_by") is None or isinstance(codes[code]["used_by"], int):
         if codes[code]["used_by"] is not None:
@@ -406,6 +425,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Code redemption limit reached!", parse_mode=ParseMode.HTML)
             return
         codes[code]["used_by"].append(user_id)
+    
     # Notify creator
     creator_id = codes[code].get("created_by")
     if creator_id:
@@ -424,6 +444,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Failed to notify creator {creator_id}: {e}")
+    
     # Deliver reward
     media = codes[code].get("media")
     text = codes[code]["text"]
@@ -551,6 +572,91 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"/ping failed: {e}")
         await update.message.reply_text("⚠️ Unable to measure ping right now.")
+        
+# --- Ban Management Handlers (NEW) ---
+
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage:\n<code>/ban &lt;user_id&gt;</code>", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid User ID. Must be a number.", parse_mode=ParseMode.HTML)
+        return
+
+    if is_admin(user_id):
+        await update.message.reply_text("❌ Cannot ban an admin.", parse_mode=ParseMode.HTML)
+        return
+    
+    global BANNED_USERS
+    if user_id in BANNED_USERS:
+        await update.message.reply_text(f"⚠️ User ID <code>{user_id}</code> is already banned.", parse_mode=ParseMode.HTML)
+        return
+
+    BANNED_USERS.add(user_id)
+    await update.message.reply_text(f"🔨 User ID <code>{user_id}</code> has been **banned**.", parse_mode=ParseMode.HTML)
+    
+    # Optional: Notify the user they were banned
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🚨 **Notification**: You have been banned from using this bot by an administrator. You will no longer be able to redeem codes."
+        )
+    except Forbidden:
+        # User has blocked the bot
+        pass
+    except Exception as e:
+        logger.warning(f"Failed to notify banned user {user_id}: {e}")
+
+async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage:\n<code>/unban &lt;user_id&gt;</code>", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid User ID. Must be a number.", parse_mode=ParseMode.HTML)
+        return
+
+    global BANNED_USERS
+    if user_id not in BANNED_USERS:
+        await update.message.reply_text(f"⚠️ User ID <code>{user_id}</code> is not currently banned.", parse_mode=ParseMode.HTML)
+        return
+
+    BANNED_USERS.remove(user_id)
+    await update.message.reply_text(f"🔓 User ID <code>{user_id}</code> has been **unbanned**.", parse_mode=ParseMode.HTML)
+    
+    # Optional: Notify the user they were unbanned
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="✅ **Notification**: You have been unbanned and can now use the bot again. Please follow all rules."
+        )
+    except Exception:
+        pass # Ignore if the user has blocked the bot
+
+async def list_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    if not BANNED_USERS:
+        await update.message.reply_text("ℹ️ No users are currently banned.", parse_mode=ParseMode.HTML)
+        return
+    
+    message = "🔨 <b>Banned Users List:</b>\n\n"
+    for user_id in sorted(list(BANNED_USERS)):
+        message += f"• <code>{user_id}</code>\n"
+
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 
 # --- Screenshot / Proof handling ---
@@ -895,10 +1001,15 @@ def main():
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
 
-    # Admin Channel Management (NEW)
+    # Admin Channel Management
     app.add_handler(CommandHandler("addchannel", add_channel))
     app.add_handler(CommandHandler("delchannel", del_channel))
     app.add_handler(CommandHandler("viewchannels", view_channels))
+    
+    # NEW: Admin Ban Management
+    app.add_handler(CommandHandler("ban", ban_user))
+    app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("listbanned", list_banned))
 
     # Admin Button Callbacks
     app.add_handler(CallbackQueryHandler(show_commands_callback, pattern="show_commands"))
