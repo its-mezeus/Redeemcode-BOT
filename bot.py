@@ -28,9 +28,6 @@ FORCE_JOIN_CHANNEL_ENV = os.getenv("FORCE_JOIN_CHANNEL", "")
 WEB_SECRET = os.getenv("WEB_SECRET", "")  # secret token for protected HTTP endpoints (restart/open)
 BOT_VERSION = os.getenv("BOT_VERSION", "v1.0")
 
-# NEW: Specific Admin for Channel Management
-CHANNEL_ADMIN_ID = 1694669957 # The ID 1694669957 is the only user who can use channel management commands.
-
 if not BOT_TOKEN or not ADMIN_IDS:
     # Relaxed check: FORCE_JOIN_CHANNEL is now optional
     raise ValueError("Missing BOT_TOKEN or ADMIN_IDS environment variables!")
@@ -197,11 +194,11 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📜 Commands", callback_data="show_commands")]])
     await query.edit_message_text(text=start_message_admin, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
-# --- Dynamic Channel Management Handlers - RESTRICTED TO CHANNEL_ADMIN_ID ---
+# --- Dynamic Channel Management Handlers ---
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != CHANNEL_ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized: Only the designated channel administrator can use this command.", parse_mode=ParseMode.HTML)
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
     if len(context.args) != 1:
         await update.message.reply_text("⚠️ Usage:\n<code>/addchannel &lt;@channel_username&gt;</code>", parse_mode=ParseMode.HTML)
@@ -231,8 +228,8 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Channel <code>{channel}</code> added to force-join list.", parse_mode=ParseMode.HTML)
 
 async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != CHANNEL_ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized: Only the designated channel administrator can use this command.", parse_mode=ParseMode.HTML)
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
     if len(context.args) != 1:
         await update.message.reply_text("⚠️ Usage:\n<code>/delchannel &lt;@channel_username&gt;</code>", parse_mode=ParseMode.HTML)
@@ -251,8 +248,8 @@ async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Channel <code>{channel}</code> removed from force-join list.", parse_mode=ParseMode.HTML)
 
 async def view_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != CHANNEL_ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized: Only the designated channel administrator can use this command.", parse_mode=ParseMode.HTML)
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized", parse_mode=ParseMode.HTML)
         return
 
     if not FORCE_CHANNELS:
@@ -1004,7 +1001,7 @@ def main():
     app.add_handler(CommandHandler("listcodes", listcodes))
     app.add_handler(CommandHandler("deletecode", deletecode))
 
-    # Admin Channel Management (Restricted by logic in handlers)
+    # Admin Channel Management
     app.add_handler(CommandHandler("addchannel", add_channel))
     app.add_handler(CommandHandler("delchannel", del_channel))
     app.add_handler(CommandHandler("viewchannels", view_channels))
